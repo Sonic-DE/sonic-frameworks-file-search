@@ -40,7 +40,7 @@ void SearchStoreTest::initTestCase()
 
     const auto parentId = filePathToId(QFile::encodeName(m_filesDir.path()));
     QVERIFY(parentId != 0);
-    auto makeDocument = [this, parentId](quint64 id, const QString &name) {
+    auto makeDocument = [this, parentId](quint64 id, const QString &name, bool indexFileName = true) {
         Document doc;
         doc.setId(id);
         doc.setParentId(parentId);
@@ -48,8 +48,10 @@ void SearchStoreTest::initTestCase()
         doc.setMTime(1);
         doc.setCTime(1);
         doc.addTerm("T0");
-        TermGenerator generator(doc);
-        generator.indexFileNameText(name);
+        if (indexFileName) {
+            TermGenerator generator(doc);
+            generator.indexFileNameText(name);
+        }
         return doc;
     };
 
@@ -80,10 +82,18 @@ void SearchStoreTest::initTestCase()
     QVERIFY(legacyKey != currentKey);
     legacy.addTerm(legacyKey);
 
+    Document currentFilename = makeDocument(parentId + 4, value + QStringLiteral(".current"));
+    Document legacyFilename = makeDocument(parentId + 5, value + QStringLiteral(".legacy"), false);
+    QByteArray legacyFilenameKey = 'F' + value.toUtf8();
+    legacyFilenameKey.truncate(25);
+    legacyFilename.addFileNameTerm(legacyFilenameKey);
+
     Transaction tr(db, Transaction::ReadWrite);
     tr.addDocument(photo);
     tr.addDocument(current);
     tr.addDocument(legacy);
+    tr.addDocument(currentFilename);
+    tr.addDocument(legacyFilename);
     QVERIFY(tr.commit());
 }
 
@@ -96,6 +106,19 @@ void SearchStoreTest::testPrefixedTerms_data()
     const QStringList metadata{QStringLiteral("current.txt"), QStringLiteral("legacy.txt")};
     QTest::newRow("filename-short-prefix") << QStringLiteral("filename:ph") << photo;
     QTest::newRow("filename-short-equality") << QStringLiteral("filename=ph") << QStringList{};
+    QTest::newRow("filename-equality") << QStringLiteral("filename=photo") << photo;
+    QTest::newRow("filename-one-character-prefix") << QStringLiteral("filename:p") << QStringList{};
+    QTest::newRow("filename-invalid-less") << QStringLiteral("filename<photo") << QStringList{};
+    QTest::newRow("filename-invalid-less-equal") << QStringLiteral("filename<=photo") << QStringList{};
+    QTest::newRow("filename-invalid-greater") << QStringLiteral("filename>photo") << QStringList{};
+    QTest::newRow("filename-invalid-greater-equal") << QStringLiteral("filename>=photo") << QStringList{};
+    QTest::newRow("filename-phrase-equality") << QStringLiteral("filename=\"photo txt\"") << photo;
+    QTest::newRow("filename-phrase-contains") << QStringLiteral("filename:\"photo txt\"") << photo;
+    QTest::newRow("filename-phrase-reversed") << QStringLiteral("filename=\"txt photo\"") << QStringList{};
+
+    const QStringList longFilenames{QStringLiteral("abcdefghijklmnopqrstuvwxyz.current"), QStringLiteral("abcdefghijklmnopqrstuvwxyz.legacy")};
+    QTest::newRow("filename-legacy-and-current-equality") << QStringLiteral("filename=abcdefghijklmnopqrstuvwxyz") << longFilenames;
+    QTest::newRow("filename-legacy-and-current-contains") << QStringLiteral("filename:abcdefghijklmnopqrstuvwxyz") << longFilenames;
     QTest::newRow("mimetype-short-prefix") << QStringLiteral("mimetype:te") << photo;
     QTest::newRow("mimetype-short-equality") << QStringLiteral("mimetype=te") << QStringList{};
     QTest::newRow("content-short-prefix") << QStringLiteral("content:ph") << QStringList{};
