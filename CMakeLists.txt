@@ -7,6 +7,8 @@ set(KF_DEP_VERSION "6.28.0") # handled by release scripts
 # set up project
 project(Baloo VERSION ${KF_VERSION})
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # set up extra-cmake-modules before trying anything else
 include(FeatureSummary)
 
