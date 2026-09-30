@@ -15,6 +15,11 @@ target_link_libraries(querytest
     KF6::Baloo
 )
 
+ecm_add_test(searchstoretest.cpp
+    TEST_NAME searchstoretest
+    LINK_LIBRARIES Qt6::Test KF6::BalooEngine KF6::Baloo
+)
+
 add_executable(basicindexingbenchmark_bin basicindexingbenchmark.cpp)
 target_link_libraries(basicindexingbenchmark_bin
     Qt6::Core
