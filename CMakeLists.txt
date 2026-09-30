@@ -1,13 +1,11 @@
 # set minimum version requirements
 cmake_minimum_required(VERSION 3.29)
-set(REQUIRED_QT_VERSION 6.9.0)
-set(KF_VERSION "6.30.0") # handled by release scripts
+set(REQUIRED_QT_VERSION 6.10.0)
+set(KF_VERSION "6.31.0") # handled by release scripts
 set(KF_DEP_VERSION "6.30.0") # handled by release scripts
 
 # set up project
 project(Baloo VERSION ${KF_VERSION})
-
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # set up extra-cmake-modules before trying anything else
 include(FeatureSummary)
