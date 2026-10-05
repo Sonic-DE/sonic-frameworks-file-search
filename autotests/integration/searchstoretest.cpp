@@ -58,6 +58,12 @@ void SearchStoreTest::initTestCase()
     photoGenerator.indexText(QStringLiteral("text/plain"), QByteArray("M"));
     photoGenerator.indexText(QStringLiteral("photograph"));
 
+    const auto fNumber = KFileMetaData::PropertyInfo::fromName(QStringLiteral("photoFNumber"));
+    QCOMPARE(fNumber.valueType(), QMetaType::Double);
+    const QByteArray fNumberPrefix = 'X' + QByteArray::number(static_cast<int>(fNumber.property())) + '-';
+    // Match Result::add()'s indexing of a double-valued metadata property.
+    photoGenerator.indexText(QVariant(2.0).toString(), fNumberPrefix);
+
     const auto artist = KFileMetaData::PropertyInfo::fromName(QStringLiteral("artist"));
     const QByteArray prefix = 'X' + QByteArray::number(static_cast<int>(artist.property())) + '-';
     const QString value = QStringLiteral("abcdefghijklmnopqrstuvwxyz");
@@ -96,6 +102,14 @@ void SearchStoreTest::testPrefixedTerms_data()
     QTest::newRow("content-long-prefix") << QStringLiteral("content:pho") << photo;
     QTest::newRow("legacy-and-current-equality") << QStringLiteral("artist=abcdefghijklmnopqrstuvwxyz") << metadata;
     QTest::newRow("legacy-and-current-contains") << QStringLiteral("artist:abcdefghijklmnopqrstuvwxyz") << metadata;
+
+    QTest::newRow("double-greater") << QStringLiteral("photoFNumber>1.5") << photo;
+    QTest::newRow("double-less") << QStringLiteral("photoFNumber<2.5") << photo;
+    QTest::newRow("double-greater-equal") << QStringLiteral("photoFNumber>=2") << photo;
+    QTest::newRow("double-less-equal") << QStringLiteral("photoFNumber<=2") << photo;
+    QTest::newRow("double-no-match") << QStringLiteral("photoFNumber>=3") << QStringList{};
+    QTest::newRow("double-invalid-greater") << QStringLiteral("photoFNumber>invalid") << QStringList{};
+    QTest::newRow("double-invalid-less") << QStringLiteral("photoFNumber<invalid") << QStringList{};
 }
 
 void SearchStoreTest::testPrefixedTerms()
