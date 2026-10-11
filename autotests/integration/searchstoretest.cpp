@@ -57,21 +57,21 @@ void SearchStoreTest::initTestCase()
 
     Document photo = makeDocument(parentId + 1, QStringLiteral("photo.txt"));
     TermGenerator photoGenerator(photo);
-    photoGenerator.indexText(QStringLiteral("text/plain"), QByteArray("M"));
+    photoGenerator.indexMimetype(QStringLiteral("text/plain"));
     photoGenerator.indexText(QStringLiteral("photograph"));
 
     const auto fNumber = KFileMetaData::PropertyInfo::fromName(QStringLiteral("photoFNumber"));
     QCOMPARE(fNumber.valueType(), QMetaType::Double);
     const QByteArray fNumberPrefix = 'X' + QByteArray::number(static_cast<int>(fNumber.property())) + '-';
     // Match Result::add()'s indexing of a double-valued metadata property.
-    photoGenerator.indexText(QVariant(2.0).toString(), fNumberPrefix);
+    photoGenerator.indexProperty(QVariant(2.0).toString(), fNumberPrefix, false);
 
     const auto artist = KFileMetaData::PropertyInfo::fromName(QStringLiteral("artist"));
     const QByteArray prefix = 'X' + QByteArray::number(static_cast<int>(artist.property())) + '-';
     const QString value = QStringLiteral("abcdefghijklmnopqrstuvwxyz");
     Document current = makeDocument(parentId + 2, QStringLiteral("current.txt"));
     TermGenerator currentGenerator(current);
-    currentGenerator.indexText(value, prefix);
+    currentGenerator.indexProperty(value, prefix, false);
 
     Document legacy = makeDocument(parentId + 3, QStringLiteral("legacy.txt"));
     // Before truncation moved into termList(), the prefix counted toward the
