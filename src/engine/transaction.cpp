@@ -14,10 +14,12 @@
 
 #include "document.h"
 #include "enginequery.h"
+#include "filenamequery.h"
 
 #include "andpostingiterator.h"
 #include "orpostingiterator.h"
 #include "phraseanditerator.h"
+#include "vectorpostingiterator.h"
 
 #include "idutils.h"
 #include "database.h"
@@ -28,6 +30,7 @@
 #include <QFile>
 #include <QFileInfo>
 
+#include <algorithm>
 #include <iostream>
 
 using namespace Baloo;
@@ -332,35 +335,20 @@ PostingIterator::Ptr Transaction::postingIterator(const EngineQuery &query) cons
     PostingDB postingDb(m_dbis.postingDbi, m_txn);
     PositionDB positionDb(m_dbis.positionDBi, m_txn);
 
-    if (query.leaf()) {
-        if (query.op() == EngineQuery::Equal) {
-            return postingDb.iter(query.term());
-        } else if (query.op() == EngineQuery::StartsWith) {
-            return postingDb.prefixIter(query.term());
-        } else {
-            Q_ASSERT(0);
-        }
-    }
-
     const auto subQueries = query.subQueries();
-    if (subQueries.isEmpty()) {
-        return nullptr;
-    }
-
-    Q_ASSERT(query.op() == EngineQuery::Phrase);
-    if (query.op() == EngineQuery::Phrase) {
-        if (subQueries.size() == 1) {
-            qCDebug(ENGINE) << "Degenerated Phrase with 1 Term:" <<  query;
-            return postingIterator(subQueries[0]);
+    if (subQueries.size() == 1) {
+        // Single term entries are not mirrored to the positiondb, so
+        // check in the postingdb
+        if (subQueries[0].m_op == EngineQuery::Equal) {
+            return postingDb.iter(subQueries[0].m_term);
+        } else {
+            return postingDb.prefixIter(subQueries[0].m_term);
         }
+    } else {
         std::vector<std::unique_ptr<VectorPositionInfoIterator>> vec;
         vec.reserve(subQueries.size());
-        for (const EngineQuery& q : subQueries) {
-            if (!q.leaf()) {
-                qCDebug(ENGINE) << "Transaction::toPostingIterator" << "Phrase subqueries must be leafs";
-                continue;
-            }
-            auto termMatch = std::unique_ptr<VectorPositionInfoIterator>(positionDb.iter(q.term()));
+        for (const auto &sq : subQueries) {
+            auto termMatch = std::unique_ptr<VectorPositionInfoIterator>(positionDb.iter(sq.m_term));
             if (!termMatch) {
                 return nullptr;
             }
@@ -369,8 +357,69 @@ PostingIterator::Ptr Transaction::postingIterator(const EngineQuery &query) cons
 
         return std::make_unique<PhraseAndIterator>(std::move(vec));
     }
-
     return nullptr;
+}
+
+PostingIterator::Ptr Transaction::postingIterator(const FilenameQuery &query) const
+{
+    PostingDB postingDb(m_dbis.postingDbi, m_txn);
+
+    const auto &terms = query.m_terms;
+    if (terms.empty()) {
+        return nullptr;
+    }
+    if (terms.size() == 1) {
+        if (query.m_expandLast) {
+            return postingDb.prefixIter('F' + terms[0]);
+        } else {
+            return postingDb.iter('F' + terms[0]);
+        }
+    }
+
+    PostingList out = postingDb.get('F' + terms[0]);
+    qCDebug(ENGINE) << terms[0] << out;
+    if (out.empty()) {
+        return nullptr;
+    }
+
+    PostingList vec1;
+
+    for (const auto &term : terms.sliced(1)) {
+        auto vec2 = postingDb.get('F' + term);
+
+        std::swap(vec1, out);
+        out.resize(0);
+        out.reserve(std::min(vec1.size(), vec2.size()));
+        std::ranges::set_intersection(vec1, vec2, std::back_inserter(out));
+        qCDebug(ENGINE) << term << vec2 << "->" << out;
+
+        if (out.empty()) {
+            return nullptr;
+        }
+    }
+
+    IdFilenameDB idFilenameDb(m_dbis.idFilenameDbi, m_txn);
+    auto removed = std::ranges::remove_if(out, [&idFilenameDb, &query](auto id) {
+        auto [parent, name] = idFilenameDb.get(id);
+        bool match = query.match(name);
+        qCDebug(ENGINE) << id << name << "<=>" << query.m_terms << "=>" << match;
+        return !match;
+    });
+    out.erase(removed.begin(), removed.end());
+
+    return std::make_unique<VectorPostingIterator>(std::move(out));
+}
+
+PostingIterator::Ptr Transaction::postingIterator(const QByteArray &key) const
+{
+    PostingDB postingDb(m_dbis.postingDbi, m_txn);
+    return postingDb.iter(key);
+}
+
+PostingIterator::Ptr Transaction::postingPrefixIterator(const QByteArray &prefix) const
+{
+    PostingDB postingDb(m_dbis.postingDbi, m_txn);
+    return postingDb.prefixIter(prefix);
 }
 
 PostingIterator::Ptr Transaction::postingCompIterator(const QByteArray &prefix, qlonglong value, PostingDB::Comparator com) const

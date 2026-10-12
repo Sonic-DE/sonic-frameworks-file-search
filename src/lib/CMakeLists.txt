@@ -3,7 +3,7 @@ set(BALOO_LIB_SRCS
     query.cpp
     queryrunnable.cpp
     resultiterator.cpp
-    advancedqueryparser.cpp
+    queryparser.cpp
 
     file.cpp
     filemonitor.cpp
@@ -99,6 +99,20 @@ install(FILES
 install(FILES baloosettings.kcfg DESTINATION ${KDE_INSTALL_KCFGDIR})
 
 ecm_generate_qdoc(KF6Baloo baloo.qdocconf)
+
+ecm_add_installed_library_check(KF6Baloo
+    PACKAGE_NAME "KF6Baloo"
+    PACKAGE_TARGET_NAMESPACE "KF6::"
+)
+
+ecm_installed_library_check_include_strings(KF6Baloo
+    HEADERS ${KF6Baloo_CamelCase_HEADERS}
+    PREFIX Baloo
+)
+
+ecm_installed_library_check_version_preprocessor_macros(KF6Baloo
+    PREFIX BALOO
+)
 
 if (NOT WIN32)
     ecm_generate_pkgconfig_file(BASE_NAME KF6Baloo

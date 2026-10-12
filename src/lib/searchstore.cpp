@@ -10,10 +10,12 @@
 #include "global.h"
 
 #include "database.h"
-#include "term.h"
-#include "transaction.h"
 #include "enginequery.h"
+#include "filenamequery.h"
+#include "term.h"
 #include "termgenerator.h"
+#include "transaction.h"
+
 #include "andpostingiterator.h"
 #include "orpostingiterator.h"
 
@@ -25,28 +27,39 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <tuple>
 
 namespace Baloo {
 
-namespace {
-QPair<quint32, quint32> calculateTimeRange(const QDateTime& dt, Term::Comparator com)
-{
-    Q_ASSERT(dt.isValid());
+using namespace Qt::StringLiterals;
 
-    if (com == Term::Equal) {
+namespace {
+QPair<quint32, quint32> calculateTimeRange(const QVariant &value, Term::Comparator com)
+{
+    const QDateTime dt = value.toDateTime();
+    if (!dt.isValid()) {
+        // Do not warn, input may not be complete
+        qCDebug(BALOO) << "Failed to parse timestamp" << value.toString();
+        return {1, 0};
+    }
+
+    if ((com == Term::Equal) || (com == Term::Contains)) {
         // Timestamps in DB are quint32 relative to Epoch (1970...2106)
-        auto start = static_cast<quint32>(dt.date().startOfDay().toSecsSinceEpoch());
-        auto end = static_cast<quint32>(dt.date().endOfDay().toSecsSinceEpoch());
+        static constexpr qint64 maxUInt32 = std::numeric_limits<quint32>::max();
+        quint32 start = std::clamp<qint64>(dt.date().startOfDay().toSecsSinceEpoch(), 0, maxUInt32);
+        quint32 end = std::clamp<qint64>(dt.date().endOfDay().toSecsSinceEpoch(), 0, maxUInt32);
         return {start, end};
     }
 
-    quint32 timet = dt.toSecsSinceEpoch();
+    quint32 timet = std::clamp<qint64>(dt.toSecsSinceEpoch(), 0, std::numeric_limits<quint32>::max());
+    qCDebug(BALOO) << "Parsed/clamped timestamp:" << dt << "->" << timet;
+
     if (com == Term::LessEqual) {
         return {0, timet};
     }
     if (com == Term::Less) {
-        return {0, timet - 1};
+        return {0, timet > 0 ? timet - 1 : 0};
     }
     if (com == Term::GreaterEqual) {
         return {timet, std::numeric_limits<quint32>::max()};
@@ -56,7 +69,7 @@ QPair<quint32, quint32> calculateTimeRange(const QDateTime& dt, Term::Comparator
     }
 
     Q_ASSERT_X(0, __func__, "mtime query must contain a valid comparator");
-    return {0, 0};
+    return {1, 0};
 }
 
 struct InternalProperty {
@@ -64,13 +77,13 @@ struct InternalProperty {
     const char* prefix;
     QMetaType::Type valueType;
 };
-constexpr std::array<InternalProperty, 7> internalProperties{{{"content", "", QMetaType::QString},
-                                                              {"filename", "F", QMetaType::QString},
-                                                              {"mimetype", "M", QMetaType::QString},
-                                                              {"rating", "R", QMetaType::Int},
-                                                              {"tag", "TAG-", QMetaType::QString},
-                                                              {"tags", "TA", QMetaType::QString},
-                                                              {"usercomment", "C", QMetaType::QString}}};
+constexpr std::array<InternalProperty, 5> internalProperties{{
+    {"content", "", QMetaType::QString},
+    {"mimetype", "M", QMetaType::QString},
+    {"rating", "R", QMetaType::Int},
+    {"tags", "TA", QMetaType::QString},
+    {"usercomment", "C", QMetaType::QString},
+}};
 
 std::pair<QByteArray, QMetaType::Type> propertyInfo(const QByteArray &property)
 {
@@ -88,58 +101,63 @@ std::pair<QByteArray, QMetaType::Type> propertyInfo(const QByteArray &property)
     }
 }
 
-EngineQuery constructEqualsQuery(const QByteArray& prefix, const QString& value)
+PostingIterator::Ptr constructEqualsQuery(Transaction *tr, const QByteArray &prefix, const QString &value, bool expandLast = false)
 {
     // We use the TermGenerator to normalize the words in the value and to
     // split it into other words. If we split the words, we then add them as a
     // phrase query.
     const QByteArrayList terms = TermGenerator::termList(value);
+    if (terms.isEmpty()) {
+        return nullptr;
+    } else if (terms.size() == 1) {
+        QByteArray arr = prefix + terms[0];
+        if (expandLast && terms[0].size() >= 3) {
+            return tr->postingPrefixIterator(arr);
+        }
+        return tr->postingIterator(arr);
+    }
 
-    QVector<EngineQuery> queries;
+    QVector<EngineQuery::PhraseTerm> queries;
     queries.reserve(terms.size());
     for (const QByteArray& term : terms) {
         QByteArray arr = prefix + term;
-        // FIXME - compatibility hack, to find truncated terms with old
-        // DBs, remove on next DB bump
-        if (arr.size() > 25) {
-            queries << EngineQuery(arr.left(25), EngineQuery::StartsWith);
-        } else {
-            queries << EngineQuery(arr);
-        }
+        queries.emplaceBack(arr, EngineQuery::Operation::Equal);
     }
 
-    if (queries.isEmpty()) {
-        return EngineQuery();
-    } else if (queries.size() == 1) {
-        return queries.first();
-    } else {
-        return EngineQuery(queries);
-    }
+    EngineQuery q(queries);
+    return tr->postingIterator(q);
 }
 
-EngineQuery constructContainsQuery(const QByteArray& prefix, const QString& value)
+PostingIterator::Ptr constructContainsQuery(Transaction *tr, const QByteArray &prefix, const QString &value)
 {
-    auto query = constructEqualsQuery(prefix, value);
-    if (query.op() == EngineQuery::Equal) {
-        if (query.term().size() >= 3) {
-            query.setOp(EngineQuery::StartsWith);
-	}
-    }
-    return query;
+    return constructEqualsQuery(tr, prefix, value, true);
 }
 
-EngineQuery constructTypeQuery(const QString& value)
+PostingIterator::Ptr constructTypeQuery(Transaction *tr, const QString &value)
 {
     Q_ASSERT(!value.isEmpty());
 
     KFileMetaData::TypeInfo ti = KFileMetaData::TypeInfo::fromName(value);
     if (ti == KFileMetaData::Type::Empty) {
         qCDebug(BALOO) << "Type" << value << "does not exist";
-        return EngineQuery();
+        return {};
     }
     int num = static_cast<int>(ti.type());
 
-    return EngineQuery('T' + QByteArray::number(num));
+    return tr->postingIterator('T' + QByteArray::number(num));
+}
+
+QString reconstructFromTerm(const Term &term)
+{
+    auto comp = term.comparator();
+    auto compString = comp == Term::Equal ? u"="_sv //
+        : comp == Term::LessEqual         ? u"<="_sv
+        : comp == Term::GreaterEqual      ? u">="_sv
+        : comp == Term::Less              ? u"<"_sv
+        : comp == Term::Greater           ? u">"_sv
+                                          : u":"_sv;
+    // Reconstruct something like "http://www.kde.org"
+    return term.property() + compString + term.value().toString();
 }
 
 PostingIterator::Ptr constructQuery(Transaction *tr, const Term &term);
@@ -277,8 +295,7 @@ PostingIterator::Ptr constructQuery(Transaction *tr, const Term &term)
     const QByteArray property = term.property().toLower().toUtf8();
 
     if (property == "type" || property == "kind") {
-        EngineQuery q = constructTypeQuery(value.toString());
-        return tr->postingIterator(q);
+        return constructTypeQuery(tr, value.toString());
     }
     else if (property == "includefolder") {
         const QByteArray folder = value.toString().toUtf8();
@@ -325,9 +342,8 @@ PostingIterator::Ptr constructQuery(Transaction *tr, const Term &term)
 
             return tr->mTimeRangeIter(startDate.startOfDay().toSecsSinceEpoch(), endDate.endOfDay().toSecsSinceEpoch());
         } else if (value.typeId() == QMetaType::QString) {
-            const QDateTime dt = value.toDateTime();
-            QPair<quint32, quint32> timerange = calculateTimeRange(dt, term.comparator());
-            if ((timerange.first == 0) && (timerange.second == 0)) {
+            QPair<quint32, quint32> timerange = calculateTimeRange(value, term.comparator());
+            if (timerange.first > timerange.second) {
                 return nullptr;
             }
             return tr->mTimeRangeIter(timerange.first, timerange.second);
@@ -338,20 +354,20 @@ PostingIterator::Ptr constructQuery(Transaction *tr, const Term &term)
     } else if (property == "tag") {
         if (term.comparator() == Term::Equal) {
             const QByteArray prefix = "TAG-";
-            EngineQuery q = EngineQuery(prefix + value.toByteArray());
-            return tr->postingIterator(q);
-        } else if (term.comparator() == Term::Contains) {
-            const QByteArray prefix = "TA";
-            EngineQuery q = constructEqualsQuery(prefix, value.toString());
-            return tr->postingIterator(q);
+            return tr->postingIterator(prefix + value.toByteArray());
         } else {
-            Q_ASSERT(0);
-            return nullptr;
+            // Delegate to "internalProperties" "tags" handler
+            return constructQuery(tr, Term{u"tags"_s, term.value(), term.comparator()});
         }
     } else if (property == "") {
         Term cterm(QStringLiteral("content"), term.value(), term.comparator());
         Term fterm(QStringLiteral("filename"), term.value(), term.comparator());
         return constructQuery(tr, Term{cterm, Term::Operation::Or, fterm});
+    } else if (property == "filename") {
+        auto com = term.comparator();
+        auto fq = FilenameQuery(value.toString(), (com == Term::Contains));
+        qCDebug(BALOO) << "filename query:" << fq;
+        return tr->postingIterator(fq);
     }
 
     QByteArray prefix;
@@ -359,7 +375,10 @@ PostingIterator::Ptr constructQuery(Transaction *tr, const Term &term)
     if (!property.isEmpty()) {
         std::tie(prefix, valueType) = propertyInfo(property);
         if (valueType == QMetaType::UnknownType) {
-            return nullptr;
+            QString reconstructed{reconstructFromTerm(term)};
+            qCDebug(BALOO) << "Unknown property" << property << "with value" //
+                           << term.value().toString() << "- using" << reconstructed;
+            return constructQuery(tr, Term{QString{}, reconstructed, Term::Equal});
         }
     }
 
@@ -368,13 +387,11 @@ PostingIterator::Ptr constructQuery(Transaction *tr, const Term &term)
         com = Term::Equal;
     }
     if (com == Term::Contains) {
-        EngineQuery q = constructContainsQuery(prefix, value.toString());
-        return tr->postingIterator(q);
+        return constructContainsQuery(tr, prefix, value.toString());
     }
 
     if (com == Term::Equal) {
-        EngineQuery q = constructEqualsQuery(prefix, value.toString());
-        return tr->postingIterator(q);
+        return constructEqualsQuery(tr, prefix, value.toString());
     }
 
     PostingDB::Comparator pcom;
@@ -387,28 +404,40 @@ PostingIterator::Ptr constructQuery(Transaction *tr, const Term &term)
     // FIXME -- has to be kept in sync with the code from
     // Baloo::Result::add
     if (valueType == QMetaType::Int) {
-        qlonglong intVal = value.toLongLong();
-
-        if (term.comparator() == Term::Greater) {
-            intVal++;
-        } else if (term.comparator() == Term::Less) {
-            intVal--;
+        bool ok = false;
+        qlonglong intVal = value.toLongLong(&ok);
+        if (!ok) {
+            qCDebug(BALOO) << "Failed to parse number" << value.toString();
+            return nullptr;
         }
 
+        if ((term.comparator() == Term::Greater) && (intVal < std::numeric_limits<qlonglong>::max())) {
+            intVal++;
+        } else if ((term.comparator() == Term::Less) && (intVal > std::numeric_limits<qlonglong>::min())) {
+            intVal--;
+        }
         return tr->postingCompIterator(prefix, intVal, pcom);
 
     } else if (valueType == QMetaType::Double) {
-        double dVal = value.toDouble();
+        bool ok = false;
+        if (!ok) {
+            qCDebug(BALOO) << "Failed to parse number" << value.toString();
+            return nullptr;
+        }
+        double dVal = value.toDouble(&ok);
         return tr->postingCompIterator(prefix, dVal, pcom);
 
     } else if (valueType == QMetaType::QDateTime) {
         QDateTime dt = value.toDateTime();
+        if (!dt.isValid()) {
+            qCDebug(BALOO) << "Failed to parse date/time" << value.toString();
+            return nullptr;
+        }
         const QByteArray ba = dt.toString(Qt::ISODate).toUtf8();
         return tr->postingCompIterator(prefix, ba, pcom);
-
-    } else {
-        qCDebug(BALOO) << "Comparison must be with an integer";
     }
+
+    qCWarning(BALOO) << "Invalid operator" << ((com == Term::LessEqual) || (com == Term::Less) ? "'<'" : "'>'") << "for string property";
 
     return nullptr;
 }

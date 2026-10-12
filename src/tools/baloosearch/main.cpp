@@ -13,11 +13,79 @@
 #include <QElapsedTimer>
 
 #include <KAboutData>
+#include <KFileMetaData/PropertyInfo>
+#include <KFileMetaData/TypeInfo>
 #include <KLocalizedString>
 
 #include "query.h"
 
+#include <array>
 #include <iostream>
+
+using namespace Qt::StringLiterals;
+
+void showKFMAllTypes(int exitCode)
+{
+    const auto allNames = KFileMetaData::TypeInfo::allNames();
+
+    QStringList output;
+    output.reserve(3 + allNames.size());
+    const auto header = i18nc("'listTypes' table header", "<typeString>     Description");
+    output.append(header);
+    output.append(QString(header.size(), u'='));
+
+    for (const auto &name : allNames) {
+        const auto &typeInfo = KFileMetaData::TypeInfo::fromName(name);
+        output.append(u"%1 %2"_s.arg(name, -16).arg(typeInfo.displayName()));
+    }
+    output.append(u""_s);
+
+    QCommandLineParser::showMessageAndExit( //
+        exitCode == 0 ? QCommandLineParser::MessageType::Information : QCommandLineParser::MessageType::Error,
+        output.join(u'\n'),
+        exitCode);
+}
+
+void showAllProperties(int exitCode)
+{
+    const auto allNames = KFileMetaData::PropertyInfo::allNames();
+    constexpr std::array internalProperties = {
+        std::pair{u"fileName"_sv, u"File name"_sv},
+        std::pair{u"content"_sv, u"File textual content"_sv},
+        std::pair{u"type"_sv, u"File type class (see --listTypes)"_sv},
+        std::pair{u"mimetype"_sv, u"File mimetype"_sv},
+        std::pair{u"modified"_sv, u"File modification time"_sv},
+        std::pair{u"tags"_sv, u"File XAttr tags"_sv},
+        std::pair{u"rating"_sv, u"File XAttr rating"_sv},
+        std::pair{u"usercomment"_sv, u"File XAttr comment"_sv},
+        std::pair{u"includefolder"_sv, u"File (indirect) parent directory"_sv},
+    };
+
+    QStringList output;
+    output.reserve(6 + allNames.size() + internalProperties.size());
+    const auto pheader = i18nc("'listProperties' table header", "Metadata Property Name                 Description");
+    output.append(pheader);
+    output.append(QString(pheader.size(), u'='));
+
+    for (const auto &name : allNames) {
+        const auto &propertyInfo = KFileMetaData::PropertyInfo::fromName(name);
+        output.append(u"%1 %2"_s.arg(name, -38).arg(propertyInfo.displayName()));
+    }
+    output.append(u""_s);
+
+    const auto iheader = i18nc("'listProperties' table header", "File Property Name                     Description");
+    output.append(iheader);
+    output.append(QString(iheader.size(), u'='));
+    for (const auto &property : internalProperties) {
+        output.append(u"%1 %2"_s.arg(property.first, -38).arg(property.second));
+    }
+    output.append(u""_s);
+
+    QCommandLineParser::showMessageAndExit( //
+        exitCode == 0 ? QCommandLineParser::MessageType::Information : QCommandLineParser::MessageType::Error,
+        output.join(u'\n'),
+        exitCode);
+}
 
 int main(int argc, char* argv[])
 {
@@ -33,23 +101,37 @@ int main(int argc, char* argv[])
     KAboutData::setApplicationData(aboutData);
 
     QCommandLineParser parser;
-    parser.addOption(QCommandLineOption(QStringList() << QStringLiteral("l") << QStringLiteral("limit"),
+    parser.addOption(QCommandLineOption({u"l"_s, u"limit"_s}, //
                                         i18n("The maximum number of results"),
-                                        i18n("limit")));
-    parser.addOption(QCommandLineOption(QStringList() << QStringLiteral("o") << QStringLiteral("offset"),
+                                        i18nc("option value name", "limit")));
+    parser.addOption(QCommandLineOption({u"o"_s, u"offset"_s}, //
                                         i18n("Offset from which to start the search"),
-                                        i18n("offset")));
-    parser.addOption(QCommandLineOption(QStringList() << QStringLiteral("t") << QStringLiteral("type"),
+                                        i18nc("option value name", "offset")));
+    parser.addOption(QCommandLineOption({u"t"_s, u"type"_s}, //
                                         i18n("Type of data to be searched"),
-                                        i18n("typeStr")));
-    parser.addOption(QCommandLineOption(QStringList() << QStringLiteral("d") << QStringLiteral("directory"),
+                                        i18nc("option value name", "typeString")));
+    parser.addOption(QCommandLineOption(u"listTypes"_s, //
+                                        i18n("Show supported <typeString> values")));
+    parser.addOption(QCommandLineOption(u"listProperties"_s, //
+                                        i18n("Show property names supported in query.")));
+    parser.addOption(QCommandLineOption({u"d"_s, u"directory"_s}, //
                                         i18n("Limit search to specified directory"),
-                                        i18n("directory")));
-    parser.addOption(QCommandLineOption({QStringLiteral("i"), QStringLiteral("id")},
+                                        i18nc("option value name", "directory")));
+    parser.addOption(QCommandLineOption({u"i"_s, u"id"_s}, //
                                         i18n("Show document IDs")));
-    parser.addOption(QCommandLineOption({QStringLiteral("s"), QStringLiteral("sort")},
-                                        i18n("Sorting criteria"), QStringLiteral("auto|time|none"), QStringLiteral("auto")));
-    parser.addPositionalArgument(i18n("query"), i18n("List of words to query for"));
+    parser.addOption(QCommandLineOption({u"s"_s, u"sort"_s}, //
+                                        i18n("Sorting criteria"),
+                                        u"auto|time|none"_s,
+                                        u"auto"_s));
+    parser.addPositionalArgument( //
+        i18n("query [(|AND|OR) query ...]"),
+        i18n("List of words to query for.\n"
+             "Each query may be single value, or a value prefixed with a property name.\n"
+             "Queries may be nested, and grouped with parentheses.\n\n\n"
+             "Example:\n"
+             "baloosearch6 -t image 'width<=2000 (filename:png OR filename:jpeg OR filename:jpg)'"
+             ""));
+    parser.setApplicationDescription(aboutData.shortDescription());
     parser.addHelpOption();
     parser.addVersionOption();
     parser.process(app);
@@ -57,33 +139,46 @@ int main(int argc, char* argv[])
     int queryLimit = -1;
     int offset = 0;
     QString typeStr;
-    bool showDocumentId = parser.isSet(QStringLiteral("id"));
+    bool showDocumentId = parser.isSet(u"id"_s);
+
+    if (parser.isSet(u"listTypes"_s)) {
+        showKFMAllTypes(0);
+    }
+
+    if (parser.isSet(u"listProperties"_s)) {
+        showAllProperties(0);
+    }
 
     QStringList args = parser.positionalArguments();
     if (args.isEmpty()) {
         parser.showHelp(1);
     }
 
-    if (parser.isSet(QStringLiteral("type"))) {
-        typeStr = parser.value(QStringLiteral("type"));
+    if (parser.isSet(u"type"_s)) {
+        typeStr = parser.value(u"type"_s);
+        const auto typeinfo = KFileMetaData::TypeInfo::fromName(typeStr);
+        if (typeinfo.type() == KFileMetaData::Type::Empty) {
+            std::cerr << qPrintable(i18n("ERROR: Invalid \"type\" value, supported values:\n")) << std::endl;
+            showKFMAllTypes(1);
+        }
     }
-    if (parser.isSet(QStringLiteral("limit"))) {
-        queryLimit = parser.value(QStringLiteral("limit")).toInt();
+    if (parser.isSet(u"limit"_s)) {
+        queryLimit = parser.value(u"limit"_s).toInt();
     }
-    if (parser.isSet(QStringLiteral("offset"))) {
-        offset = parser.value(QStringLiteral("offset")).toInt();
+    if (parser.isSet(u"offset"_s)) {
+        offset = parser.value(u"offset"_s).toInt();
     }
     const Baloo::Query::SortingOption orderBy = [&parser]() {
-       auto val = parser.value(QStringLiteral("sort"));
-       if (val == QStringLiteral("auto")) {
-           return Baloo::Query::SortAuto;
-       } else if (val == QStringLiteral("time")) {
-           return Baloo::Query::SortAuto;
-       } else if (val == QStringLiteral("none")) {
-           return Baloo::Query::SortNone;
-       } else {
-           parser.showHelp(1);
-       }
+        auto val = parser.value(u"sort"_s);
+        if (val == u"auto"_s) {
+            return Baloo::Query::SortAuto;
+        } else if (val == u"time"_s) {
+            return Baloo::Query::SortAuto;
+        } else if (val == u"none"_s) {
+            return Baloo::Query::SortNone;
+        } else {
+            parser.showHelp(1);
+        }
     }();
 
     QString queryStr = args.join(QLatin1Char(' '));
@@ -95,8 +190,8 @@ int main(int argc, char* argv[])
     query.setOffset(offset);
     query.setSortingOption(orderBy);
 
-    if (parser.isSet(QStringLiteral("directory"))) {
-        QString folderName = parser.value(QStringLiteral("directory"));
+    if (parser.isSet(u"directory"_s)) {
+        QString folderName = parser.value(u"directory"_s);
         const QFileInfo fi(folderName);
         if (!fi.isDir()) {
             std::cerr << qPrintable(i18n("%1 is not a valid directory", folderName)) << std::endl;

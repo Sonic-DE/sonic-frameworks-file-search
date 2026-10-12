@@ -5,19 +5,22 @@
     SPDX-License-Identifier: LGPL-2.1-or-later
 */
 
-#include "database.h"
-#include "transaction.h"
-#include "document.h"
-#include "termgenerator.h"
-#include "enginequery.h"
-#include "idutils.h"
 #include "query.h"
+#include "database.h"
+#include "document.h"
+#include "enginequery.h"
+#include "filenamequery.h"
+#include "idutils.h"
+#include "termgenerator.h"
+#include "transaction.h"
 
 #include <memory>
+
 #include <QTest>
 #include <QTemporaryDir>
 
 using namespace Baloo;
+using namespace Qt::StringLiterals;
 
 class SortedIdVector : public QVector<quint64> {
     public:
@@ -40,7 +43,8 @@ char *toString(const QVector<quint64> &idlist)
 }
 
 namespace {
-QVector<quint64> execQuery(const Transaction& tr, const EngineQuery& query)
+template<typename QueryT>
+QVector<quint64> execQuery(const Transaction &tr, const QueryT &query)
 {
     std::unique_ptr<PostingIterator> it{tr.postingIterator(query)};
     if (!it) {
@@ -59,16 +63,12 @@ class QueryTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
-    void initTestCase() {
+    void initTestCase()
+    {
+        // Make timestamp parsing independent of host locale
+        qputenv("TZ", "UTC");
+
         dir = std::make_unique<QTemporaryDir>();
-    }
-
-    void init() {
-        dbDir = std::make_unique<QTemporaryDir>();
-        db = std::make_unique<Database>(dbDir->path());
-        QCOMPARE(db->open(Database::CreateDatabase), Database::OpenResult::Success);
-        setenv("BALOO_DB_PATH", dbDir->path().toStdString().c_str(), 1);
-
         m_parentId = filePathToId(QFile::encodeName(dir->path()));
         m_id1 = m_parentId + 1;
         m_id2 = m_parentId + 2;
@@ -79,6 +79,15 @@ private Q_SLOTS:
         m_id7 = m_parentId + 7;
         m_id8 = m_parentId + 8;
         m_id9 = m_parentId + 9;
+        m_id10 = m_parentId + 10;
+    }
+
+    void init()
+    {
+        dbDir = std::make_unique<QTemporaryDir>();
+        db = std::make_unique<Database>(dbDir->path());
+        QCOMPARE(db->open(Database::CreateDatabase), Database::OpenResult::Success);
+        setenv("BALOO_DB_PATH", dbDir->path().toStdString().c_str(), 1);
 
         insertDocuments();
         insertTagDocuments();
@@ -91,8 +100,11 @@ private Q_SLOTS:
 
     void testTermEqual();
     void testTermStartsWith();
-    void testTermPhrase_data();
-    void testTermPhrase();
+    void testContentPhrase_data();
+    void testContentPhrase();
+    void testFilenamePhrase_data();
+    void testFilenamePhrase();
+    void testPhrases_dataCommon();
 
     void testTagTerm_data();
     void testTagTerm();
@@ -154,8 +166,8 @@ private:
         tg.indexFileNameText(fileName);
         doc.setId(id);
         doc.setParentId(m_parentId);
-        doc.setMTime(3);
-        doc.setCTime(4);
+        doc.setMTime(3600 * 24 + 30);
+        doc.setCTime(3600 * 24 + 40);
 
         tr->addDocument(doc);
     }
@@ -169,6 +181,7 @@ private:
     quint64 m_id7;
     quint64 m_id8;
     quint64 m_id9;
+    quint64 m_id10;
 };
 
 void QueryTest::insertDocuments()
@@ -181,6 +194,7 @@ void QueryTest::insertDocuments()
     addDocument(&tr, QStringLiteral("Don't feel sorry for yourself. Only assholes do that"), m_id3, QStringLiteral("file3"));
     addDocument(&tr, QStringLiteral("Only the dead stay 17 forever. crazy"), m_id4, QStringLiteral("file4"));
     addDocument(&tr, QStringLiteral("Some content with isolated dot . Test it"), m_id9, QStringLiteral("file - with hyphen.txt"));
+    addDocument(&tr, QStringLiteral("File with URL: https://www.kde.org"), m_id10, QStringLiteral("url:file.txt"));
 
     renameDocument(&tr, m_id8, QStringLiteral("file8_easy"));
     tr.commit();
@@ -207,7 +221,7 @@ void QueryTest::insertTagDocuments()
 
 void QueryTest::testTermEqual()
 {
-    EngineQuery q("the");
+    EngineQuery q({EngineQuery::PhraseTerm("the", EngineQuery::Equal)});
 
     QVector<quint64> result = SortedIdVector{m_id1, m_id2, m_id4, m_id7};
     Transaction tr(db.get(), Transaction::ReadOnly);
@@ -216,61 +230,76 @@ void QueryTest::testTermEqual()
 
 void QueryTest::testTermStartsWith()
 {
-    EngineQuery q("for", EngineQuery::StartsWith);
+    EngineQuery q({EngineQuery::PhraseTerm("for", EngineQuery::StartsWith)});
 
     QVector<quint64> result = SortedIdVector{m_id3, m_id4};
     Transaction tr(db.get(), Transaction::ReadOnly);
     QCOMPARE(execQuery(tr, q), result);
 }
 
-void QueryTest::testTermPhrase_data()
+void QueryTest::testPhrases_dataCommon()
 {
-    QTest::addColumn<QByteArrayList>("phrase");
+    QTest::addColumn<QString>("phrase");
     QTest::addColumn<QVector<quint64>>("contentMatches");
     QTest::addColumn<QVector<quint64>>("filenameMatches");
 
-    auto addRow = [](const char* name, const QByteArrayList& phrase,
+    auto addRow = [](const char *name, //
+                     const QString &phrase,
                      const QVector<quint64> contentMatches,
-                     const QVector<quint64> filenameMatches)
-        { QTest::addRow("%s", name) << phrase << contentMatches << filenameMatches;};
+                     const QVector<quint64> filenameMatches) {
+        QTest::addRow("%s", name) << phrase << contentMatches << filenameMatches;
+    };
 
     // Content matches
-    addRow("Crazy dog",        {QByteArrayLiteral("crazy"), QByteArrayLiteral("dog")},  SortedIdVector{ m_id1 }, {});
-    addRow("Lazy dog",         {QByteArrayLiteral("lazy"),  QByteArrayLiteral("dog")},  SortedIdVector{ m_id7 }, {});
-    addRow("Brown fox",        {QByteArrayLiteral("brown"), QByteArrayLiteral("fox")},  SortedIdVector{ m_id1, m_id7, m_id8 }, {});
-    addRow("Dog",              {QByteArrayLiteral("dog")},                              SortedIdVector{ m_id1, m_id7, m_id8 }, {});
+    // clang-format off
+    addRow("Crazy dog",        {u"crazy dog"_s},  {m_id1},               {});
+    addRow("Lazy dog",         {u"lazy dog"_s},   {m_id7},               {});
+    addRow("Brown fox",        {u"brown fox"_s},  {m_id1, m_id7, m_id8}, {});
+    addRow("Dog",              {u"dog"_s},        {m_id1, m_id7, m_id8}, {});
     // Filename matches
-    addRow("Crazy dog file 1", {QByteArrayLiteral("file1")},                            {}, SortedIdVector{ m_id1 });
-    addRow("Crazy dog file 2", {QByteArrayLiteral("file1"), QByteArrayLiteral("txt")},  {}, SortedIdVector{ m_id1 });
-    addRow("Lazy dog file 1",  {QByteArrayLiteral("file7")},                            {}, SortedIdVector{ m_id7 });
-    addRow("Lazy dog file 2",  {QByteArrayLiteral("file7"), QByteArrayLiteral("lazy")}, {}, SortedIdVector{ m_id7 });
+    addRow("Crazy dog file 1", {u"file1"_s},      {},                    {m_id1});
+    addRow("Crazy dog file 2", {u"file1 txt"_s},  {},                    {m_id1});
+    addRow("Lazy dog file 1",  {u"file7"_s},      {},                    {m_id7});
+    addRow("Lazy dog file 2",  {u"file7 lazy"_s}, {},                    {m_id7});
     // Matches content and filename
-    addRow("Lazy both",        {QByteArrayLiteral("lazy")},                             { m_id7 }, { m_id7 });
-    addRow("Easy both",        {QByteArrayLiteral("easy")},                             { m_id8 }, { m_id8 });
+    addRow("Lazy both",        {u"lazy"_s},       {m_id7},               {m_id7});
+    addRow("Easy both",        {u"easy"_s},       {m_id8},               {m_id8});
+    // clang-format off
 }
 
-void QueryTest::testTermPhrase()
+void QueryTest::testContentPhrase_data()
 {
-    QFETCH(QByteArrayList, phrase);
-    QFETCH(QVector<quint64>, contentMatches);
-    QFETCH(QVector<quint64>, filenameMatches);
+    testPhrases_dataCommon();
+}
 
-    QVector<EngineQuery> queries;
-    for (const QByteArray& term : phrase) {
-        queries << EngineQuery(term);
+void QueryTest::testContentPhrase()
+{
+    QFETCH(QString, phrase);
+    QFETCH(QVector<quint64>, contentMatches);
+
+    QVector<EngineQuery::PhraseTerm> queries;
+    for (const QByteArray& term : TermGenerator::termList(phrase)) {
+        queries.emplaceBack(term, EngineQuery::Equal);
     }
     EngineQuery q(queries);
 
     Transaction tr(db.get(), Transaction::ReadOnly);
     QCOMPARE(execQuery(tr, q), contentMatches);
+}
 
-    queries.clear();
-    const QByteArray fPrefix = QByteArrayLiteral("F");
-    for (QByteArray term : phrase) {
-        term = fPrefix + term;
-        queries << EngineQuery(term);
-    }
-    EngineQuery qf(queries);
+void QueryTest::testFilenamePhrase_data()
+{
+    testPhrases_dataCommon();
+}
+
+void QueryTest::testFilenamePhrase()
+{
+    QFETCH(QString, phrase);
+    QFETCH(QVector<quint64>, filenameMatches);
+
+    FilenameQuery qf(phrase);
+
+    Transaction tr(db.get(), Transaction::ReadOnly);
     QCOMPARE(execQuery(tr, qf), filenameMatches);
 }
 
@@ -293,7 +322,7 @@ void QueryTest::testTagTerm()
     QFETCH(QVector<quint64>, matchIds);
 
     QByteArray prefix{"TA"};
-    EngineQuery q(prefix + term);
+    EngineQuery q({EngineQuery::PhraseTerm(prefix + term, EngineQuery::Equal)});
 
     Transaction tr(db.get(), Transaction::ReadOnly);
     QCOMPARE(execQuery(tr, q), matchIds);
@@ -320,9 +349,9 @@ void QueryTest::testTagTermPhrase()
     QFETCH(QVector<quint64>, matchIds);
 
     QByteArray prefix{"TA"};
-    QVector<EngineQuery> queries;
+    QVector<EngineQuery::PhraseTerm> queries;
     for (const QByteArray& term : terms) {
-        queries << EngineQuery(prefix + term);
+        queries.emplaceBack(prefix + term, EngineQuery::Equal);
     }
 
     EngineQuery q(queries);
@@ -402,6 +431,26 @@ void QueryTest::testSearchstringParser_data()
     addRow(QStringLiteral("content:dot"), { QStringLiteral("file - with hyphen.txt") });
     addRow(QStringLiteral("dot . Test"), { QStringLiteral("file - with hyphen.txt") });
     addRow(QStringLiteral("\"dot . Test\""), { QStringLiteral("file - with hyphen.txt") });
+    // clang-format off
+    addRow(u"file.txt"_s,                {u"url:file.txt"_s});
+    addRow(u"\"url:file\""_s,            {u"url:file.txt"_s});
+    addRow(u"url_file"_s,                {u"url:file.txt"_s});
+    addRow(u"url:file"_s,                {u"url:file.txt"_s});
+    addRow(u"www.kde.org"_s,             {u"url:file.txt"_s});
+    addRow(u"\"https://www.kde.org\""_s, {u"url:file.txt"_s});
+    addRow(u"https_//www.kde.org"_s,     {u"url:file.txt"_s});
+    addRow(u"https://www.kde.org"_s,     {u"url:file.txt"_s});
+    addRow(u"modified:0"_s,              {}); // invalid date string
+    addRow(u"modified:1970-01-02"_s,     {u"tagFile1"_s, u"tagFile2"_s});
+    addRow(u"mtime:1970-01-02"_s,        {u"tagFile1"_s, u"tagFile2"_s});
+    addRow(u"mtime:1970-01-01 sorry"_s,  {u"file3"_s});
+    addRow(u"mtime:1960-01-01"_s,        {});
+    addRow(u"modified=1970-01-02"_s,     {u"tagFile1"_s, u"tagFile2"_s});
+    addRow(u"modified>=1970-01-02"_s,    {u"tagFile1"_s, u"tagFile2"_s});
+    addRow(u"modified>1970-01-02"_s,     {u"tagFile1"_s, u"tagFile2"_s});
+    addRow(u"modified>1970-01-03"_s,     {});
+    addRow(u"mtime>1960-01-03 tag:f1"_s, {u"tagFile1"_s});
+    // clang-format off
 }
 
 QTEST_MAIN(QueryTest)

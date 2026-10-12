@@ -1,13 +1,11 @@
 # set minimum version requirements
-cmake_minimum_required(VERSION 3.29)
-set(REQUIRED_QT_VERSION 6.9.0)
-set(KF_VERSION "6.30.0") # handled by release scripts
+cmake_minimum_required(VERSION 3.30)
+set(REQUIRED_QT_VERSION 6.10.0)
+set(KF_VERSION "6.31.0") # handled by release scripts
 set(KF_DEP_VERSION "6.30.0") # handled by release scripts
 
 # set up project
 project(Baloo VERSION ${KF_VERSION})
-
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # set up extra-cmake-modules before trying anything else
 include(FeatureSummary)
@@ -52,6 +50,7 @@ include(ECMGeneratePkgConfigFile)
 include(ECMConfiguredInstall)
 include(ECMDeprecationSettings)
 include(ECMQmlModule)
+include(ECMInstalledLibraryCheck)
 
 set(EXCLUDE_DEPRECATED_BEFORE_AND_AT 0 CACHE STRING "Control the range of deprecated API excluded from the build [default=0].")
 
