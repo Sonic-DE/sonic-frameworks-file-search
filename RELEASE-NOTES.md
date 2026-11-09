@@ -2,7 +2,7 @@
 
 Sonic Frameworks File Search indexes your files in the background, so SonicDE can find them instantly when you search.
 
-## Unreleased
+## 6.31.0.1 (2026-11-10)
 
 - The background file indexer now starts automatically on the SonicDE desktop.
 
