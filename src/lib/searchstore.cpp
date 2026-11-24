@@ -489,6 +489,10 @@ PostingIterator::Ptr constructQuery(Transaction *tr, const Term &term)
         auto com = term.comparator();
         auto mq = MimetypeQuery(value, (com == Term::Contains));
         qCDebug(BALOO) << "mimetype query:" << mq;
+        if (mq.m_terms.size() == 1) {
+            // Keep the short-prefix matching single terms had through the "M" property prefix.
+            return constructEqualsQuery(tr, QByteArray("M"), value, com == Term::Contains);
+        }
         return tr->postingIterator(mq);
     } else if (property == "metadata") {
         auto com = term.comparator();
@@ -523,6 +527,10 @@ PostingIterator::Ptr constructQuery(Transaction *tr, const Term &term)
         auto com = term.comparator();
         auto pq = PropertyPhraseQuery(value, prefix, (com == Term::Contains));
         qCDebug(BALOO) << "property query:" << pq;
+        if (pq.m_terms.size() == 1) {
+            // Single terms keep the short-prefix and legacy-key matching of the "X<n>-" lookup.
+            return constructEqualsQuery(tr, 'X' + prefix + '-', value, com == Term::Contains);
+        }
         return tr->postingIterator(pq);
     } else if (isProperty) {
         prefix = 'X' + prefix + '-';

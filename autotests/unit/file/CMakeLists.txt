@@ -71,6 +71,10 @@ ecm_add_test(
     LINK_LIBRARIES Qt6::Test baloofilecommon
 )
 
+# These write the same baloofilerc in Qt's test-mode config directory.
+set_tests_properties(fileindexerconfigtest filtereddiriteratortest filewatchtest modifiedfileindexertest
+    PROPERTIES RESOURCE_LOCK baloofilerc)
+
 # Processing of document content
 add_executable(documentcontenttest_bin
     documentcontenttest.cpp

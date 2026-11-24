@@ -64,14 +64,14 @@ void SearchStoreTest::initTestCase()
     QCOMPARE(fNumber.valueType(), QMetaType::Double);
     const QByteArray fNumberPrefix = 'X' + QByteArray::number(static_cast<int>(fNumber.property())) + '-';
     // Match Result::add()'s indexing of a double-valued metadata property.
-    photoGenerator.indexProperty(QVariant(2.0).toString(), fNumberPrefix, false);
+    photoGenerator.indexProperty(QVariant(2.0).toString(), fNumberPrefix);
 
     const auto artist = KFileMetaData::PropertyInfo::fromName(QStringLiteral("artist"));
     const QByteArray prefix = 'X' + QByteArray::number(static_cast<int>(artist.property())) + '-';
     const QString value = QStringLiteral("abcdefghijklmnopqrstuvwxyz");
     Document current = makeDocument(parentId + 2, QStringLiteral("current.txt"));
     TermGenerator currentGenerator(current);
-    currentGenerator.indexProperty(value, prefix, false);
+    currentGenerator.indexProperty(value, prefix);
 
     Document legacy = makeDocument(parentId + 3, QStringLiteral("legacy.txt"));
     // Before truncation moved into termList(), the prefix counted toward the
