@@ -7,11 +7,7 @@
 
 #include "query.h"
 
-#include "queryparser.h"
 #include "searchstore.h"
-#include "term.h"
-
-#include "baloodebug.h"
 
 #include <QString>
 #include <QStringList>
@@ -20,17 +16,18 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 
+#include <limits>
+
 using namespace Qt::StringLiterals;
 
-const int defaultLimit = -1;
+const uint defaultLimit = std::numeric_limits<uint>::max();
 
 class BALOO_CORE_NO_EXPORT Baloo::Query::Private {
 public:
-    Baloo::Term m_term;
-
     QStringList m_types;
     QString m_searchString;
-    int m_limit = defaultLimit;
+    QStringList m_searchScopes;
+    uint m_limit = defaultLimit;
     uint m_offset = 0;
 
     int m_yearFilter = 0;
@@ -56,6 +53,7 @@ Query::Query(const Query& rhs)
 
 Query::~Query() = default;
 
+#if BALOO_CORE_BUILD_DEPRECATED_SINCE(6, 32)
 void Query::addType(const QString& type)
 {
     d->m_types << type.split(QLatin1Char('/'), Qt::SkipEmptyParts);
@@ -73,6 +71,7 @@ void Query::setType(const QString& type)
     d->m_types.clear();
     addType(type);
 }
+#endif
 
 void Query::setTypes(const QStringList& types)
 {
@@ -92,8 +91,6 @@ QString Query::searchString() const
 void Query::setSearchString(const QString& str)
 {
     d->m_searchString = str;
-
-    d->m_term = Term();
 }
 
 uint Query::limit() const
@@ -158,44 +155,19 @@ void Query::setIncludeFolder(const QString& folder)
     d->m_includeFolder = folder;
 }
 
+QStringList Query::searchScopes() const
+{
+    return d->m_searchScopes;
+}
+
+void Query::setSearchScopes(const QStringList &scopes)
+{
+    d->m_searchScopes = scopes;
+}
+
 ResultIterator Query::exec()
 {
-    Term term;
-    if (!d->m_searchString.isEmpty()) {
-        if (d->m_term.isValid()) {
-            qCDebug(BALOO) << "Term already set";
-        }
-        term = QueryParser::parse(d->m_searchString);
-    } else {
-        term = d->m_term;
-    }
-
-    if (!d->m_types.isEmpty()) {
-        for (const QString& type : std::as_const(d->m_types)) {
-            term = term && Term(QStringLiteral("type"), type);
-        }
-    }
-
-    if (!d->m_includeFolder.isEmpty()) {
-        term = term && Term(QStringLiteral("includefolder"), d->m_includeFolder);
-    }
-
-    if (d->m_yearFilter || d->m_monthFilter || d->m_dayFilter) {
-        QByteArray ba = QByteArray::number(d->m_yearFilter);
-        if (d->m_monthFilter < 10) {
-            ba += '0';
-        }
-        ba += QByteArray::number(d->m_monthFilter);
-        if (d->m_dayFilter < 10) {
-            ba += '0';
-        }
-        ba += QByteArray::number(d->m_dayFilter);
-
-        term = term && Term(QStringLiteral("modified"), ba, Term::Equal);
-    }
-
-    SearchStore searchStore;
-    auto results = searchStore.exec(term, d->m_offset, d->m_limit, d->m_sortingOption == SortAuto);
+    auto results = SearchStore::exec(*this);
     return ResultIterator(std::move(results));
 }
 
@@ -219,8 +191,8 @@ QByteArray Query::toJSON()
         map[QStringLiteral("searchString")] = d->m_searchString;
     }
 
-    if (d->m_term.isValid()) {
-        map[QStringLiteral("term")] = QVariant(d->m_term.toVariantMap());
+    if (!d->m_searchScopes.isEmpty()) {
+        map[QStringLiteral("searchScopes")] = d->m_searchScopes;
     }
 
     if (d->m_yearFilter > 0) {
@@ -264,7 +236,7 @@ Query Query::fromJSON(const QByteArray& arr)
 
     query.d->m_offset = map[QStringLiteral("offset")].toUInt();
     query.d->m_searchString = map[QStringLiteral("searchString")].toString();
-    query.d->m_term = Term::fromVariantMap(map[QStringLiteral("term")].toMap());
+    query.d->m_searchScopes = map[QStringLiteral("searchScopes")].toStringList();
 
     if (map.contains(QStringLiteral("yearFilter"))) {
         query.d->m_yearFilter = map[QStringLiteral("yearFilter")].toInt();
@@ -285,9 +257,6 @@ Query Query::fromJSON(const QByteArray& arr)
         query.d->m_includeFolder = map.value(QStringLiteral("includeFolder")).toString();
     }
 
-    if (!query.d->m_searchString.isEmpty() && query.d->m_term.isValid()) {
-        qCWarning(BALOO) << "Only one of 'searchString' and 'term' should be set:" << arr;
-    }
     return query;
 }
 
@@ -309,21 +278,22 @@ QUrl Query::toSearchUrl(const QString& title)
     return url;
 }
 
-static QString jsonQueryFromUrl(const QUrl &url)
+static Query typeQueryFromUrl(const QUrl &url)
 {
     const QString path = url.path();
 
-    if (path == QLatin1String("/documents")) {
-        return QStringLiteral("{\"type\":[\"Document\"]}");
-    } else if (path.endsWith(QLatin1String("/images"))) {
-        return QStringLiteral("{\"type\":[\"Image\"]}");
-    } else if (path.endsWith(QLatin1String("/audio"))) {
-        return QStringLiteral("{\"type\":[\"Audio\"]}");
-    } else if (path.endsWith(QLatin1String("/videos"))) {
-        return QStringLiteral("{\"type\":[\"Video\"]}");
+    Query query;
+    if (path == "/documents"_L1) {
+        query.setTypes({u"Document"_s});
+    } else if (path.endsWith("/images"_L1)) {
+        query.setTypes({u"Image"_s});
+    } else if (path.endsWith("/audio"_L1)) {
+        query.setTypes({u"Audio"_s});
+    } else if (path.endsWith("/videos"_L1)) {
+        query.setTypes({u"Video"_s});
     }
 
-    return QString();
+    return query;
 }
 
 Query Query::fromSearchUrl(const QUrl& url)
@@ -346,12 +316,7 @@ Query Query::fromSearchUrl(const QUrl& url)
         return q;
     }
 
-    const QString jsonString = jsonQueryFromUrl(url);
-    if (!jsonString.isEmpty()) {
-        return Query::fromJSON(jsonString.toUtf8());
-    }
-
-    return Query();
+    return typeQueryFromUrl(url);
 }
 
 QString Query::titleFromQueryUrl(const QUrl& url)
@@ -381,7 +346,16 @@ bool Query::operator==(const Query& rhs) const
         }
     }
 
-    return d->m_term == rhs.d->m_term;
+    if (rhs.d->m_searchScopes.size() != d->m_searchScopes.size()) {
+        return false;
+    }
+
+    for (const QString &scope : std::as_const(rhs.d->m_searchScopes)) {
+        if (!d->m_searchScopes.contains(scope)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool Query::operator!=(const Query& rhs) const

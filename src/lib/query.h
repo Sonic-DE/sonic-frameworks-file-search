@@ -37,7 +37,7 @@ namespace Baloo {
  *
  * "artist:Coldplay" -> Look for any files with the artist "Coldplay"
  *
- * "artist:(Coldplay OR Maroon5) power" -> Look for files with the artist Coldplay or Maroon5 and
+ * "(artist:Coldplay OR artist:Maroon5) power" -> Look for files with the artist Coldplay or Maroon5 and
  * the word "power"
  *
  * "artist:'Noah and the Whale'" -> Look for files with the artist "Noah and the Whale"
@@ -58,34 +58,39 @@ public:
     Query(const Query& rhs);
     ~Query();
 
+#if BALOO_CORE_ENABLE_DEPRECATED_SINCE(6, 32)
     /*!
-     * Add a type to the results of the query.
-     *
-     * Every file has a higher level type such as "Audio", "Video", "Image", "Document", etc.
-     *
-     * Please note that the types are ANDed together. So searching for "Image"
-     * and "Video" will probably never return any results. Have a look at
-     * KFileMetaData::TypeInfo for a list of type names.
+     * \deprecated[6.32] Use types()/setTypes()
      */
     void addType(const QString& type);
 
     /*!
-     *
+     * \deprecated[6.32] Use types()/setTypes()
      */
     void addTypes(const QStringList& typeList);
 
     /*!
-     *
+     * \deprecated[6.32] Use setTypes()
      */
     void setType(const QString& type);
+#endif
 
     /*!
+     * Set a filter to limit the query results to specific file types.
      *
+     * Every file has a high level type such as "Audio", "Video", "Image",
+     * "Document", etc.
+     *
+     * Please note that the \a types are ANDed together. So searching for
+     * "Image" and "Video" will probably never return any results. Have a
+     * look at KFileMetaData::TypeInfo for a list of type names.
+     *
+     * Use an empty list to clear the type filter.
      */
     void setTypes(const QStringList& types);
 
     /*!
-     *
+     * \sa setTypes()
      */
     QStringList types() const;
 
@@ -102,7 +107,9 @@ public:
 
     /*!
      * Only a maximum of \a limit results will be returned.
-     * By default the value is -1
+     *
+     * The default \a limit value of std::numeric_limits<uint>::max()
+     * will be treated as unlimited.
      */
     void setLimit(uint limit);
 
@@ -172,6 +179,35 @@ public:
      *
      */
     QString includeFolder() const;
+
+    /*!
+     * Limit where to look for a match
+     *
+     * By default (empty \a scopes), terms are matched with the filename,
+     * plain text content, and any string like property from the file
+     * metadata (e.g. Album or Artist name).
+     *
+     * Search terms with an explicit property name are not affected by
+     * the search scope value.
+     *
+     * If multiple scopes are provided, each is checked and the results
+     * are combined. Invalid/unknown scopes are ignored. Scope names
+     * are case insensitive.
+     *
+     * \value FileName
+     * \value Content
+     * \value Metadata
+     *
+     * \since 6.32
+     */
+    void setSearchScopes(const QStringList &scopes);
+
+    /*!
+     * \sa setSearchScopes()
+     *
+     * \since 6.32
+     */
+    QStringList searchScopes() const;
 
     /*!
      *

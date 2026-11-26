@@ -12,6 +12,10 @@
 #include "database.h"
 #include "enginequery.h"
 #include "filenamequery.h"
+#include "mimetypequery.h"
+#include "propertyphrasequery.h"
+#include "query.h"
+#include "queryparser.h"
 #include "term.h"
 #include "termgenerator.h"
 #include "transaction.h"
@@ -35,12 +39,12 @@ namespace Baloo {
 using namespace Qt::StringLiterals;
 
 namespace {
-QPair<quint32, quint32> calculateTimeRange(const QVariant &value, Term::Comparator com)
+QPair<quint32, quint32> calculateTimeRange(const QString &value, Term::Comparator com)
 {
-    const QDateTime dt = value.toDateTime();
+    const QDateTime dt = QDateTime::fromString(value, Qt::ISODate);
     if (!dt.isValid()) {
         // Do not warn, input may not be complete
-        qCDebug(BALOO) << "Failed to parse timestamp" << value.toString();
+        qCDebug(BALOO) << "Failed to parse timestamp" << value;
         return {1, 0};
     }
 
@@ -77,28 +81,53 @@ struct InternalProperty {
     const char* prefix;
     QMetaType::Type valueType;
 };
-constexpr std::array<InternalProperty, 5> internalProperties{{
+constexpr std::array<InternalProperty, 4> internalProperties{{
     {"content", "", QMetaType::QString},
-    {"mimetype", "M", QMetaType::QString},
     {"rating", "R", QMetaType::Int},
     {"tags", "TA", QMetaType::QString},
     {"usercomment", "C", QMetaType::QString},
 }};
 
-std::pair<QByteArray, QMetaType::Type> propertyInfo(const QByteArray &property)
+std::tuple<bool, QByteArray, QMetaType::Type> propertyInfo(const QByteArray &property)
 {
     auto it = std::find_if(std::begin(internalProperties), std::end(internalProperties),
         [&property] (const InternalProperty& entry) { return property == entry.propertyName; });
     if (it != std::end(internalProperties)) {
-        return { (*it).prefix, (*it).valueType };
+        return {false, (*it).prefix, (*it).valueType};
     } else {
         KFileMetaData::PropertyInfo pi = KFileMetaData::PropertyInfo::fromName(QString::fromUtf8(property));
         if (pi.property() == KFileMetaData::Property::Empty) {
-            return {QByteArray(), QMetaType::UnknownType};
+            return {false, QByteArray(), QMetaType::UnknownType};
         }
         int propPrefix = static_cast<int>(pi.property());
-        return {QByteArray('X' + QByteArray::number(propPrefix) + '-'), pi.valueType()};
+        return {true, QByteArray::number(propPrefix), pi.valueType()};
     }
+}
+
+using KFMDPropertyInfix = QByteArray;
+const std::vector<KFMDPropertyInfix> &defaultIndexedProperties()
+{
+    const static std::vector<KFMDPropertyInfix> properties = []() {
+        const auto allNames = KFileMetaData::PropertyInfo::allNames();
+        std::vector<KFMDPropertyInfix> v;
+        v.reserve(allNames.size());
+
+        for (const auto &name : allNames) {
+            const auto &propertyInfo = KFileMetaData::PropertyInfo::fromName(name);
+            if (!propertyInfo.shouldBeIndexed()) {
+                continue;
+            }
+            if (propertyInfo.valueType() != QMetaType::QString) {
+                // Should not happen, but as KFMD is external ignore it with a warning
+                qCWarning(BALOO) << "Unexpected non-string property" << name;
+                continue;
+            }
+            const int propertyNumber = static_cast<int>(propertyInfo.property());
+            v.emplace_back(QByteArray::number(propertyNumber));
+        }
+        return v;
+    }();
+    return properties;
 }
 
 PostingIterator::Ptr constructEqualsQuery(Transaction *tr, const QByteArray &prefix, const QString &value, bool expandLast = false)
@@ -142,6 +171,27 @@ PostingIterator::Ptr constructContainsQuery(Transaction *tr, const QByteArray &p
     return constructEqualsQuery(tr, prefix, value, true);
 }
 
+PostingIterator::Ptr constructFolderQuery(Transaction *tr, const QString &value)
+{
+    const QByteArray folder = value.toUtf8();
+
+    if (folder.isEmpty()) {
+        return nullptr;
+    }
+    if (!folder.startsWith('/')) {
+        qCDebug(BALOO) << "Invalid include folder:" << value;
+        return nullptr;
+    }
+
+    quint64 id = tr->documentId(folder);
+    if (!id) {
+        qCDebug(BALOO) << "Folder" << value << "not indexed";
+        return nullptr;
+    }
+
+    return tr->docUrlIter(id);
+}
+
 PostingIterator::Ptr constructTypeQuery(Transaction *tr, const QString &value)
 {
     Q_ASSERT(!value.isEmpty());
@@ -166,51 +216,145 @@ QString reconstructFromTerm(const Term &term)
         : comp == Term::Greater           ? u">"_sv
                                           : u":"_sv;
     // Reconstruct something like "http://www.kde.org"
-    return term.property() + compString + term.value().toString();
+    return term.property() + compString + term.value();
 }
 
 PostingIterator::Ptr constructQuery(Transaction *tr, const Term &term);
 
+QStringList cleanedScopes(const QStringList &scopes)
+{
+    QStringList knownScopes{
+        u"filename"_s,
+        u"content"_s,
+        u"metadata"_s,
+    };
+
+    QStringList cleaned;
+    for (const auto &scope : scopes) {
+        auto lower = scope.toLower();
+        if (knownScopes.contains(lower)) {
+            cleaned.push_back(lower);
+        } else {
+            qCDebug(BALOO) << "Scope" << lower << "unknown";
+        }
+    }
+    if (cleaned.empty()) {
+        qCDebug(BALOO) << "Using default scope list:" << knownScopes;
+        return knownScopes;
+    }
+    return cleaned;
+}
+
+Term expandScopes(const QStringList &scopes, const Term &term)
+{
+    if (!term.subTerms().isEmpty()) {
+        QList<Term> expanded;
+        for (auto subterm : term.subTerms()) {
+            // recurse
+            expanded.push_back(expandScopes(scopes, subterm));
+        }
+        return Term{term.operation(), expanded};
+    } else if (term.property().isEmpty()) {
+        // should expand
+        Term expanded;
+        for (auto scope : scopes) {
+            Term withScope{scope, term.value(), term.comparator()};
+            expanded = Term{expanded, Term::Or, withScope};
+        }
+        return expanded;
+    }
+    return term;
+}
+
+PostingIterator::Ptr constructFromQuery(Transaction *tr, const Query &q)
+{
+    std::vector<std::unique_ptr<PostingIterator>> vec;
+
+    if (!q.searchString().isEmpty()) {
+        Term term = QueryParser::parse(q.searchString());
+        auto scopes = cleanedScopes(q.searchScopes());
+        auto expanded = expandScopes(scopes, term);
+        qCDebug(BALOO) << scopes << "x" << term << "->" << expanded;
+        if (auto it = constructQuery(tr, expanded)) {
+            vec.push_back(std::move(it));
+        } else {
+            return {};
+        }
+    }
+
+    for (const QString &type : q.types()) {
+        if (auto it = constructTypeQuery(tr, type)) {
+            vec.push_back(std::move(it));
+        } else {
+            return {};
+        }
+    }
+
+    if (!q.includeFolder().isEmpty()) {
+        if (auto it = constructFolderQuery(tr, q.includeFolder())) {
+            vec.push_back(std::move(it));
+        } else {
+            return {};
+        }
+    }
+
+    if (q.yearFilter() || q.monthFilter() || q.dayFilter()) {
+        int year = q.yearFilter();
+        int month = q.monthFilter();
+        int day = q.dayFilter();
+
+        month = month >= 0 && month <= 12 ? month : 0;
+        day = day >= 0 && day <= 31 ? day : 0;
+
+        QDate startDate(year, month ? month : 1, day ? day : 1);
+        QDate endDate(startDate);
+
+        if (month == 0) {
+            endDate.setDate(endDate.year(), 12, 31);
+        } else if (day == 0) {
+            endDate.setDate(endDate.year(), endDate.month(), endDate.daysInMonth());
+        }
+
+        auto start = startDate.startOfDay().toSecsSinceEpoch();
+        auto end = endDate.endOfDay().toSecsSinceEpoch();
+        if (auto it = tr->mTimeRangeIter(start, end)) {
+            vec.push_back(std::move(it));
+        } else {
+            qCDebug(BALOO) << "Invalid year/month/day filter:" << year << month << day;
+            return {};
+        }
+    }
+
+    return std::make_unique<AndPostingIterator>(std::move(vec));
+}
 } // namespace
 
-SearchStore::SearchStore()
-    : m_db(nullptr)
+ResultList SearchStore::exec(const Query &query)
 {
-    m_db = globalDatabaseInstance();
-    if (m_db->open(Database::ReadOnlyDatabase) != Database::OpenResult::Success) {
-        m_db = nullptr;
-    }
-}
-
-SearchStore::~SearchStore()
-{
-}
-
-// Return the result with-in [offset, offset + limit)
-ResultList SearchStore::exec(const Term& term, uint offset, int limit, bool sortResults)
-{
-    if (!m_db) {
+    auto db = globalDatabaseInstance();
+    if (!db || db->open(Database::ReadOnlyDatabase) != Database::OpenResult::Success) {
         return ResultList();
     }
 
-    Transaction tr(m_db, Transaction::ReadOnly);
-    auto it = constructQuery(&tr, term);
+    Transaction tr(db, Transaction::ReadOnly);
+    auto it = constructFromQuery(&tr, query);
     if (!it) {
         return ResultList();
     }
 
-    if (sortResults) {
-        QVector<std::pair<quint64, quint32>> resultIds;
+    if (query.sortingOption() == Query::SortAuto) {
+        std::vector<std::pair<quint64, quint32>> resultIds;
         while (it->next()) {
             quint64 id = it->docId();
             quint32 mtime = tr.documentTimeInfo(id).mTime;
-            resultIds << std::pair<quint64, quint32>{id, mtime};
+            resultIds.emplace_back(id, mtime);
 
             Q_ASSERT(id > 0);
         }
 
         // Not enough results within range, no need to sort.
-        if (offset >= static_cast<uint>(resultIds.size())) {
+        const size_t offset = query.offset();
+        if (offset >= resultIds.size()) {
             return ResultList();
         }
 
@@ -220,14 +364,17 @@ ResultList SearchStore::exec(const Term& term, uint offset, int limit, bool sort
         };
 
         std::sort(resultIds.begin(), resultIds.end(), compFunc);
-        if (limit < 0) {
-            limit = resultIds.size();
-        }
 
         ResultList results;
-        const uint end = qMin(static_cast<uint>(resultIds.size()), offset + static_cast<uint>(limit));
+        const size_t end = [&query, offset, count = resultIds.size()]() {
+            if (query.limit() == std::numeric_limits<uint>::max()) {
+                return count;
+            }
+            return std::min<size_t>(offset + query.limit(), count);
+        }();
+
         results.reserve(end - offset);
-        for (uint i = offset; i < end; i++) {
+        for (size_t i = offset; i < end; i++) {
             const quint64 id = resultIds[i].first;
             Result res{tr.documentUrl(id), id};
 
@@ -235,10 +382,11 @@ ResultList SearchStore::exec(const Term& term, uint offset, int limit, bool sort
         }
 
         return results;
-    }
-    else {
+
+    } else {
         ResultList results;
-        uint ulimit = limit < 0 ? UINT_MAX : limit;
+        uint ulimit = query.limit();
+        uint offset = query.offset();
 
         while (offset && it->next()) {
             offset--;
@@ -296,82 +444,32 @@ PostingIterator::Ptr constructQuery(Transaction *tr, const Term &term)
     if (term.value().isNull()) {
         return nullptr;
     }
-    Q_ASSERT(term.value().isValid());
+    Q_ASSERT(!term.isEmpty());
     Q_ASSERT(term.comparator() != Term::Auto);
-    Q_ASSERT(term.comparator() == Term::Contains ? term.value().typeId() == QMetaType::QString : true);
 
-    const QVariant value = term.value();
+    const QString value = term.value();
     const QByteArray property = term.property().toLower().toUtf8();
 
     if (property == "type" || property == "kind") {
-        return constructTypeQuery(tr, value.toString());
+        return constructTypeQuery(tr, value);
     }
     else if (property == "includefolder") {
-        const QByteArray folder = value.toString().toUtf8();
-
-        if (folder.isEmpty()) {
-            return nullptr;
-        }
-        if (!folder.startsWith('/')) {
-            return nullptr;
-        }
-
-        quint64 id = tr->documentId(folder);
-        if (!id) {
-            qCDebug(BALOO) << "Folder" << value.toString() << "not indexed";
-            return nullptr;
-        }
-
-        return tr->docUrlIter(id);
+        return constructFolderQuery(tr, value);
     }
     else if (property == "modified" || property == "mtime") {
-        if (value.typeId() == QMetaType::QByteArray) {
-            // Used by Baloo::Query
-            QByteArray ba = value.toByteArray();
-            Q_ASSERT(ba.size() >= 4);
-
-            int year = ba.mid(0, 4).toInt();
-            int month = ba.mid(4, 2).toInt();
-            int day = ba.mid(6, 2).toInt();
-
-            Q_ASSERT(year);
-
-            // uses 0 to represent whole month or whole year
-            month = month >= 0 && month <= 12 ? month : 0;
-            day = day >= 0 && day <= 31 ? day : 0;
-
-            QDate startDate(year, month ? month : 1, day ? day : 1);
-            QDate endDate(startDate);
-
-            if (month == 0) {
-                endDate.setDate(endDate.year(), 12, 31);
-            } else if (day == 0) {
-                endDate.setDate(endDate.year(), endDate.month(), endDate.daysInMonth());
-            }
-
-            return tr->mTimeRangeIter(startDate.startOfDay().toSecsSinceEpoch(), endDate.endOfDay().toSecsSinceEpoch());
-        } else if (value.typeId() == QMetaType::QString) {
-            QPair<quint32, quint32> timerange = calculateTimeRange(value, term.comparator());
-            if (timerange.first > timerange.second) {
-                return nullptr;
-            }
-            return tr->mTimeRangeIter(timerange.first, timerange.second);
-        } else {
-            Q_ASSERT_X(0, "SearchStore::constructQuery", "modified property must contain date/datetime values");
+        QPair<quint32, quint32> timerange = calculateTimeRange(value, term.comparator());
+        if (timerange.first > timerange.second) {
             return nullptr;
         }
+        return tr->mTimeRangeIter(timerange.first, timerange.second);
     } else if (property == "tag") {
         if (term.comparator() == Term::Equal) {
             const QByteArray prefix = "TAG-";
-            return tr->postingIterator(prefix + value.toByteArray());
+            return tr->postingIterator(prefix + value.toUtf8());
         } else {
             // Delegate to "internalProperties" "tags" handler
             return constructQuery(tr, Term{u"tags"_s, term.value(), term.comparator()});
         }
-    } else if (property == "") {
-        Term cterm(QStringLiteral("content"), term.value(), term.comparator());
-        Term fterm(QStringLiteral("filename"), term.value(), term.comparator());
-        return constructQuery(tr, Term{cterm, Term::Operation::Or, fterm});
     } else if (property == "filename") {
         auto com = term.comparator();
         if (com != Term::Equal && com != Term::Contains) {
@@ -379,26 +477,63 @@ PostingIterator::Ptr constructQuery(Transaction *tr, const Term &term)
                             << "for filename property";
             return nullptr;
         }
-        auto fq = FilenameQuery(value.toString(), (com == Term::Contains));
+        auto fq = FilenameQuery(value, (com == Term::Contains));
         qCDebug(BALOO) << "filename query:" << fq;
         if (fq.m_terms.size() == 1) {
             // Preserve the existing short-prefix and legacy-key matching for
             // single terms; only phrases need the IdFilenameDB name check.
-            return constructEqualsQuery(tr, QByteArray("F"), value.toString(), com == Term::Contains);
+            return constructEqualsQuery(tr, QByteArray("F"), value, com == Term::Contains);
         }
         return tr->postingIterator(fq);
+    } else if (property == "mimetype") {
+        auto com = term.comparator();
+        auto mq = MimetypeQuery(value, (com == Term::Contains));
+        qCDebug(BALOO) << "mimetype query:" << mq;
+        if (mq.m_terms.size() == 1) {
+            // Keep the short-prefix matching single terms had through the "M" property prefix.
+            return constructEqualsQuery(tr, QByteArray("M"), value, com == Term::Contains);
+        }
+        return tr->postingIterator(mq);
+    } else if (property == "metadata") {
+        auto com = term.comparator();
+        const auto propertyInfixes = defaultIndexedProperties();
+
+        std::vector<std::unique_ptr<PostingIterator>> vec;
+        vec.reserve(propertyInfixes.size());
+
+        for (const auto &infix : propertyInfixes) {
+            auto pq = PropertyPhraseQuery(value, infix, (com == Term::Contains));
+            qCDebug(BALOO) << "metadata/property query:" << pq;
+            vec.push_back(tr->postingIterator(pq));
+        }
+        return std::make_unique<OrPostingIterator>(std::move(vec));
     }
 
+    bool isProperty = false;
     QByteArray prefix;
     QMetaType::Type valueType = QMetaType::QString;
     if (!property.isEmpty()) {
-        std::tie(prefix, valueType) = propertyInfo(property);
+        std::tie(isProperty, prefix, valueType) = propertyInfo(property);
         if (valueType == QMetaType::UnknownType) {
             QString reconstructed{reconstructFromTerm(term)};
             qCDebug(BALOO) << "Unknown property" << property << "with value" //
-                           << term.value().toString() << "- using" << reconstructed;
-            return constructQuery(tr, Term{QString{}, reconstructed, Term::Equal});
+                           << term.value() << "- using" << reconstructed;
+            auto scopes = cleanedScopes({});
+            auto t = Term{QString{}, reconstructed, Term::Equal};
+            return constructQuery(tr, expandScopes(scopes, t));
         }
+    }
+    if (isProperty && valueType == QMetaType::QString) {
+        auto com = term.comparator();
+        auto pq = PropertyPhraseQuery(value, prefix, (com == Term::Contains));
+        qCDebug(BALOO) << "property query:" << pq;
+        if (pq.m_terms.size() == 1) {
+            // Single terms keep the short-prefix and legacy-key matching of the "X<n>-" lookup.
+            return constructEqualsQuery(tr, 'X' + prefix + '-', value, com == Term::Contains);
+        }
+        return tr->postingIterator(pq);
+    } else if (isProperty) {
+        prefix = 'X' + prefix + '-';
     }
 
     auto com = term.comparator();
@@ -406,11 +541,11 @@ PostingIterator::Ptr constructQuery(Transaction *tr, const Term &term)
         com = Term::Equal;
     }
     if (com == Term::Contains) {
-        return constructContainsQuery(tr, prefix, value.toString());
+        return constructContainsQuery(tr, prefix, value);
     }
 
     if (com == Term::Equal) {
-        return constructEqualsQuery(tr, prefix, value.toString());
+        return constructEqualsQuery(tr, prefix, value);
     }
 
     PostingDB::Comparator pcom;
@@ -426,7 +561,7 @@ PostingIterator::Ptr constructQuery(Transaction *tr, const Term &term)
         bool ok = false;
         qlonglong intVal = value.toLongLong(&ok);
         if (!ok) {
-            qCDebug(BALOO) << "Failed to parse number" << value.toString();
+            qCDebug(BALOO) << "Failed to parse number" << value;
             return nullptr;
         }
 
@@ -441,15 +576,15 @@ PostingIterator::Ptr constructQuery(Transaction *tr, const Term &term)
         bool ok = false;
         double dVal = value.toDouble(&ok);
         if (!ok) {
-            qCDebug(BALOO) << "Failed to parse number" << value.toString();
+            qCDebug(BALOO) << "Failed to parse number" << value;
             return nullptr;
         }
         return tr->postingCompIterator(prefix, dVal, pcom);
 
     } else if (valueType == QMetaType::QDateTime) {
-        QDateTime dt = value.toDateTime();
+        const QDateTime dt = QDateTime::fromString(value, Qt::ISODate);
         if (!dt.isValid()) {
-            qCDebug(BALOO) << "Failed to parse date/time" << value.toString();
+            qCDebug(BALOO) << "Failed to parse date/time" << value;
             return nullptr;
         }
         const QByteArray ba = dt.toString(Qt::ISODate).toUtf8();

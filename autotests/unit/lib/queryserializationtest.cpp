@@ -9,6 +9,8 @@
 
 #include <QTest>
 
+using namespace Qt::StringLiterals;
+
 class QuerySerializationTest : public QObject
 {
     Q_OBJECT
@@ -19,6 +21,8 @@ private Q_SLOTS:
     void testJSON_data();
     void testURL();
     void testURL_data();
+    void testTypeURL();
+    void testTypeURL_data();
 
     void testCustomOptions();
 };
@@ -32,7 +36,7 @@ void QuerySerializationTest::testBasic()
     query.setLimit(5);
     query.setOffset(1);
     query.setSearchString(QStringLiteral("Bookie"));
-    query.addType(QStringLiteral("File/Audio"));
+    query.setTypes({u"Text"_s, u"Document"_s});
 
     QByteArray json = query.toJSON();
     Query q = Query::fromJSON(json);
@@ -41,8 +45,8 @@ void QuerySerializationTest::testBasic()
     QCOMPARE(q.offset(), static_cast<uint>(1));
     QCOMPARE(q.searchString(), QLatin1String("Bookie"));
     QCOMPARE(q.types().size(), 2);
-    QVERIFY(q.types().contains(QLatin1String("File")));
-    QVERIFY(q.types().contains(QLatin1String("Audio")));
+    QVERIFY(q.types().contains(u"Text"_s));
+    QVERIFY(q.types().contains(u"Document"_s));
 
     QCOMPARE(q, query);
 }
@@ -100,17 +104,41 @@ void QuerySerializationTest::testURL_data()
     QTest::addRow("looksLikePercentEncoded") << QStringLiteral("%22 abc %22");
 }
 
+void QuerySerializationTest::testTypeURL()
+{
+    QFETCH(QString, url);
+    QFETCH(QStringList, types);
+
+    Query q = Query::fromSearchUrl(QUrl{u"baloosearch://"_s + url});
+
+    QCOMPARE(q.types(), types);
+}
+
+void QuerySerializationTest::testTypeURL_data()
+{
+    QTest::addColumn<QString>("url");
+    QTest::addColumn<QStringList>("types");
+
+    QTest::addRow("documents") << u"/documents"_s << QList{u"Document"_s};
+    QTest::addRow("audio") << u"/audio"_s << QList{u"Audio"_s};
+    QTest::addRow("images") << u"/images"_s << QList{u"Image"_s};
+    QTest::addRow("videos") << u"/videos"_s << QList{u"Video"_s};
+}
+
 void QuerySerializationTest::testCustomOptions()
 {
     Query query;
-    query.addType(QStringLiteral("File"));
+    query.setTypes({u"File"_s});
     query.setIncludeFolder(QStringLiteral("/home/vishesh"));
+    query.setSearchScopes({u"filename"_s, u"metadata"_s});
 
     QByteArray json = query.toJSON();
     Query q = Query::fromJSON(json);
 
     QString includeFolder = q.includeFolder();
     QCOMPARE(includeFolder, QStringLiteral("/home/vishesh"));
+    QVERIFY(q.searchScopes().contains(u"filename"_s));
+    QVERIFY(q.searchScopes().contains(u"metadata"_s));
 
     QCOMPARE(query, q);
 }

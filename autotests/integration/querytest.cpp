@@ -11,6 +11,9 @@
 #include "enginequery.h"
 #include "filenamequery.h"
 #include "idutils.h"
+#include "mimetypequery.h"
+#include "propertydata.h"
+#include "propertyphrasequery.h"
 #include "termgenerator.h"
 #include "transaction.h"
 
@@ -21,16 +24,6 @@
 
 using namespace Baloo;
 using namespace Qt::StringLiterals;
-
-class SortedIdVector : public QVector<quint64> {
-    public:
-        SortedIdVector(const QVector<quint64>& list)
-        : QVector<quint64>(list) {
-            std::sort(begin(), end());
-        }
-        SortedIdVector(std::initializer_list<quint64> args)
-        : SortedIdVector(QVector<quint64>(args)) {}
-};
 
 char *toString(const QVector<quint64> &idlist)
 {
@@ -57,6 +50,11 @@ QVector<quint64> execQuery(const Transaction &tr, const QueryT &query)
     }
     return results;
 }
+
+struct PropertyTerm {
+    QByteArray prefix;
+    QString text;
+};
 } // namespace
 
 class QueryTest : public QObject
@@ -70,16 +68,9 @@ private Q_SLOTS:
 
         dir = std::make_unique<QTemporaryDir>();
         m_parentId = filePathToId(QFile::encodeName(dir->path()));
-        m_id1 = m_parentId + 1;
-        m_id2 = m_parentId + 2;
-        m_id3 = m_parentId + 3;
-        m_id4 = m_parentId + 4;
-        m_id5 = m_parentId + 5;
-        m_id6 = m_parentId + 6;
-        m_id7 = m_parentId + 7;
-        m_id8 = m_parentId + 8;
-        m_id9 = m_parentId + 9;
-        m_id10 = m_parentId + 10;
+        for (size_t i = 0; i < m_ids.size(); i++) {
+            m_ids[i] = m_parentId + i;
+        }
     }
 
     void init()
@@ -91,6 +82,7 @@ private Q_SLOTS:
 
         insertDocuments();
         insertTagDocuments();
+        insertPropertyDocuments();
     }
 
     void cleanup() {
@@ -106,6 +98,12 @@ private Q_SLOTS:
     void testFilenamePhrase();
     void testPhrases_dataCommon();
 
+    void testMimetypePhrase();
+    void testMimetypePhrase_data();
+
+    void testPropertyPhrase();
+    void testPropertyPhrase_data();
+
     void testTagTerm_data();
     void testTagTerm();
     void testTagTermPhrase_data();
@@ -114,6 +112,9 @@ private Q_SLOTS:
     void testSearchstringParser();
     void testSearchstringParser_data();
 
+    void testScopedQuery();
+    void testScopedQuery_data();
+
 private:
     std::unique_ptr<QTemporaryDir> dir;
     std::unique_ptr<QTemporaryDir> dbDir;
@@ -121,14 +122,16 @@ private:
     quint64 m_parentId = 0;
 
     void insertDocuments();
-    void addDocument(Transaction* tr,const QString& text, quint64 id, const QString& fileName)
+    void addDocument(Transaction *tr, const QStringList &text, quint64 id, const QString &fileName)
     {
         Document doc;
         QString url = dir->path() + QLatin1Char('/') + fileName;
         doc.setUrl(QFile::encodeName(url));
 
         TermGenerator tg(doc);
-        tg.indexText(text);
+        for (const auto &block : text) {
+            tg.indexText(block);
+        }
         tg.indexFileNameText(fileName);
         doc.setId(id);
         doc.setParentId(m_parentId);
@@ -159,7 +162,7 @@ private:
         doc.setUrl(QFile::encodeName(url));
 
         TermGenerator tg(doc);
-        tg.indexText(QStringLiteral("text/plain"), QByteArray("M"));
+        tg.indexMimetype(QStringLiteral("text/plain"));
         for (const QString& tag : tags) {
             tg.indexXattrText(tag, QByteArray("TA"));
         }
@@ -172,50 +175,90 @@ private:
         tr->addDocument(doc);
     }
 
-    quint64 m_id1;
-    quint64 m_id2;
-    quint64 m_id3;
-    quint64 m_id4;
-    quint64 m_id5;
-    quint64 m_id6;
-    quint64 m_id7;
-    quint64 m_id8;
-    quint64 m_id9;
-    quint64 m_id10;
+    void insertPropertyDocuments();
+    void addPropertyDocument(Transaction *tr, const QList<PropertyTerm> &properties, quint64 id, const QString &fileName)
+    {
+        Document doc;
+        QString url = dir->path() + QLatin1Char('/') + fileName;
+        doc.setUrl(QFile::encodeName(url));
+
+        QByteArray jsonData{1, '{'};
+        TermGenerator tg(doc);
+        for (const auto &property : properties) {
+            const QByteArray prefix{'X' + property.prefix + '-'};
+            tg.indexProperty(property.text, prefix);
+            jsonData += '"' + property.prefix + "\":\"" //
+                + property.text.toUtf8() + "\",";
+        }
+        tg.indexFileNameText(fileName);
+        doc.setId(id);
+        doc.setParentId(m_parentId);
+        doc.setMTime(1000);
+        doc.setCTime(1200);
+        jsonData.back() = '}';
+        doc.setData(jsonData);
+
+        tr->addDocument(doc);
+    }
+
+    std::array<quint64, 17> m_ids{};
 };
 
 void QueryTest::insertDocuments()
 {
     Transaction tr(db.get(), Transaction::ReadWrite);
-    addDocument(&tr, QStringLiteral("The quick brown fox jumped over the crazy dog"), m_id1, QStringLiteral("file1.txt"));
-    addDocument(&tr, QStringLiteral("The quick brown fox jumped over the lazy dog"), m_id7, QStringLiteral("file7_lazy"));
-    addDocument(&tr, QStringLiteral("A quick brown fox ran around a easy dog"), m_id8, QStringLiteral("file8_dog"));
-    addDocument(&tr, QStringLiteral("The night is dark and full of terror"), m_id2, QStringLiteral("file2"));
-    addDocument(&tr, QStringLiteral("Don't feel sorry for yourself. Only assholes do that"), m_id3, QStringLiteral("file3"));
-    addDocument(&tr, QStringLiteral("Only the dead stay 17 forever. crazy"), m_id4, QStringLiteral("file4"));
-    addDocument(&tr, QStringLiteral("Some content with isolated dot . Test it"), m_id9, QStringLiteral("file - with hyphen.txt"));
-    addDocument(&tr, QStringLiteral("File with URL: https://www.kde.org"), m_id10, QStringLiteral("url:file.txt"));
+    // clang-format off
+    addDocument(&tr, {u"The quick brown fox jumped over the crazy dog"_s},        m_ids[1],  u"file1.txt"_s);
+    addDocument(&tr, {u"The quick brown fox jumped over the lazy dog"_s},         m_ids[7],  u"file7_lazy"_s);
+    addDocument(&tr, {u"A quick brown fox ran around a easy dog"_s},              m_ids[8],  u"file8_dog"_s);
+    addDocument(&tr, {u"The night is dark and full of terror"_s},                 m_ids[2],  u"file2"_s);
+    addDocument(&tr, {u"Don't feel sorry for yourself. Only assholes do that"_s}, m_ids[3],  u"file3"_s);
+    addDocument(&tr, {u"Only the dead stay 17 forever. crazy"_s},                 m_ids[4],  u"file4"_s);
+    addDocument(&tr, {u"Some content with isolated dot . Test it"_s},             m_ids[9],  u"file - with hyphen.txt"_s);
+    addDocument(&tr, {u"File with URL: https://www.kde.org"_s},                   m_ids[10], u"url:file.txt"_s);
+    addDocument(&tr, {u"First page."_s, u"Second page."_s},                       m_ids[13], u"two_page.txt"_s);
+    addDocument(&tr, {u"Soft hy\u00ad"_s, u"phen."_s},                            m_ids[14], u"two_page_hyphenated.txt"_s);
+    addDocument(&tr, {u"Start."_s, u"Line 2."_s, u"Last."_s},                     m_ids[15], u"three_line.txt"_s);
+    addDocument(&tr, {u"single"_s},                                               m_ids[16], u"one_word.txt"_s);
+    // clang-format on
 
-    renameDocument(&tr, m_id8, QStringLiteral("file8_easy"));
+    renameDocument(&tr, m_ids[8], QStringLiteral("file8_easy"));
     tr.commit();
 }
 
 void QueryTest::insertTagDocuments()
 {
     Transaction tr(db.get(), Transaction::ReadWrite);
-    addTagDocument(&tr, {
-	QStringLiteral("One"),
-	QStringLiteral("Two"),
-	QStringLiteral("Three"),
-	QStringLiteral("Four"),
-	QStringLiteral("F1")
-    }, m_id5, QStringLiteral("tagFile1"));
-    addTagDocument(&tr, {
-	QStringLiteral("One"),
-	QStringLiteral("Two-Three"),
-	QStringLiteral("Four"),
-	QStringLiteral("F2")
-    }, m_id6, QStringLiteral("tagFile2"));
+    addTagDocument(&tr, //
+                   {u"One"_s, u"Two"_s, u"Three"_s, u"Four"_s, u"F1"_s},
+                   m_ids[5],
+                   u"tagFile1"_s);
+    addTagDocument(&tr, //
+                   {u"One"_s, u"Two-Three"_s, u"Four"_s, u"F2"_s},
+                   m_ids[6],
+                   u"tagFile2"_s);
+    tr.commit();
+}
+
+void QueryTest::insertPropertyDocuments()
+{
+    Transaction tr(db.get(), Transaction::ReadWrite);
+    addPropertyDocument(&tr, //
+                        {
+                            {"9", u"The Artist Number 1"_s}, // artist
+                            {"10", u"Album Number 2"_s}, // album
+                        },
+                        m_ids[11],
+                        u"propertyFile.mp3"_s);
+    addPropertyDocument(&tr, //
+                        {
+                            {"9", u"Photographer Name"_s}, // artist
+                            {"31", u"Great Camera Model 2"_s}, // model
+                            {"26", u"1234"_s}, // width
+                            {"40", u"0.234"_s}, // photoExposureTime
+                        },
+                        m_ids[12],
+                        u"propertyFile.jpg"_s);
     tr.commit();
 }
 
@@ -223,7 +266,7 @@ void QueryTest::testTermEqual()
 {
     EngineQuery q({EngineQuery::PhraseTerm("the", EngineQuery::Equal)});
 
-    QVector<quint64> result = SortedIdVector{m_id1, m_id2, m_id4, m_id7};
+    QVector<quint64> result{m_ids[1], m_ids[2], m_ids[4], m_ids[7]};
     Transaction tr(db.get(), Transaction::ReadOnly);
     QCOMPARE(execQuery(tr, q), result);
 }
@@ -232,7 +275,7 @@ void QueryTest::testTermStartsWith()
 {
     EngineQuery q({EngineQuery::PhraseTerm("for", EngineQuery::StartsWith)});
 
-    QVector<quint64> result = SortedIdVector{m_id3, m_id4};
+    QVector<quint64> result{m_ids[3], m_ids[4]};
     Transaction tr(db.get(), Transaction::ReadOnly);
     QCOMPARE(execQuery(tr, q), result);
 }
@@ -252,18 +295,18 @@ void QueryTest::testPhrases_dataCommon()
 
     // Content matches
     // clang-format off
-    addRow("Crazy dog",        {u"crazy dog"_s},  {m_id1},               {});
-    addRow("Lazy dog",         {u"lazy dog"_s},   {m_id7},               {});
-    addRow("Brown fox",        {u"brown fox"_s},  {m_id1, m_id7, m_id8}, {});
-    addRow("Dog",              {u"dog"_s},        {m_id1, m_id7, m_id8}, {});
+    addRow("Crazy dog",        {u"crazy dog"_s},  {m_ids[1]},                     {});
+    addRow("Lazy dog",         {u"lazy dog"_s},   {m_ids[7]},                     {});
+    addRow("Brown fox",        {u"brown fox"_s},  {m_ids[1], m_ids[7], m_ids[8]}, {});
+    addRow("Dog",              {u"dog"_s},        {m_ids[1], m_ids[7], m_ids[8]}, {});
     // Filename matches
-    addRow("Crazy dog file 1", {u"file1"_s},      {},                    {m_id1});
-    addRow("Crazy dog file 2", {u"file1 txt"_s},  {},                    {m_id1});
-    addRow("Lazy dog file 1",  {u"file7"_s},      {},                    {m_id7});
-    addRow("Lazy dog file 2",  {u"file7 lazy"_s}, {},                    {m_id7});
+    addRow("Crazy dog file 1", {u"file1"_s},      {},                             {m_ids[1]});
+    addRow("Crazy dog file 2", {u"file1 txt"_s},  {},                             {m_ids[1]});
+    addRow("Lazy dog file 1",  {u"file7"_s},      {},                             {m_ids[7]});
+    addRow("Lazy dog file 2",  {u"file7 lazy"_s}, {},                             {m_ids[7]});
     // Matches content and filename
-    addRow("Lazy both",        {u"lazy"_s},       {m_id7},               {m_id7});
-    addRow("Easy both",        {u"easy"_s},       {m_id8},               {m_id8});
+    addRow("Lazy both",        {u"lazy"_s},       {m_ids[7]},                     {m_ids[7]});
+    addRow("Easy both",        {u"easy"_s},       {m_ids[8]},                     {m_ids[8]});
     // clang-format off
 }
 
@@ -303,17 +346,67 @@ void QueryTest::testFilenamePhrase()
     QCOMPARE(execQuery(tr, qf), filenameMatches);
 }
 
+void QueryTest::testMimetypePhrase_data()
+{
+    QTest::addColumn<QString>("phrase");
+    QTest::addColumn<QList<quint64>>("mimetypeMatches");
+
+    QTest::addRow("text") << u"text"_s << QList{m_ids[5], m_ids[6]};
+    QTest::addRow("plain") << u"plain"_s << QList{m_ids[5], m_ids[6]};
+    QTest::addRow("text/plain") << u"text/plain"_s << QList{m_ids[5], m_ids[6]};
+}
+
+void QueryTest::testMimetypePhrase()
+{
+    QFETCH(QString, phrase);
+    QFETCH(QList<quint64>, mimetypeMatches);
+
+    MimetypeQuery qm(phrase);
+
+    Transaction tr(db.get(), Transaction::ReadOnly);
+    QCOMPARE(execQuery(tr, qm), mimetypeMatches);
+}
+
+void QueryTest::testPropertyPhrase_data()
+{
+    QTest::addColumn<QByteArray>("propertyInfix");
+    QTest::addColumn<QString>("phrase");
+    QTest::addColumn<QList<quint64>>("propertyMatches");
+
+    QTest::addRow("AlbumArtist") << "9"_ba << u"Artist"_s << QList{m_ids[11]};
+    QTest::addRow("AlbumArtist2") << "9"_ba << u"1"_s << QList{m_ids[11]};
+    QTest::addRow("AlbumArtistPhrase") << "9"_ba << u"Artist Number 1"_s << QList{m_ids[11]};
+    QTest::addRow("AlbumArtistPhraseNoMatch2") << "9"_ba << u"Artist Number 2"_s << QList<quint64>{};
+    QTest::addRow("AlbumArtistPhraseNoMatch3") << "9"_ba << u"Artist Number 3"_s << QList<quint64>{};
+    QTest::addRow("AlbumArtistBadPhrase") << "9"_ba << u"Artist 1"_s << QList<quint64>{};
+    QTest::addRow("Photographer") << "9"_ba << u"Photographer"_s << QList{m_ids[12]};
+    QTest::addRow("Width") << "26"_ba << u"1234"_s << QList{m_ids[12]};
+    QTest::addRow("Exposure") << "40"_ba << u"0.234"_s << QList{m_ids[12]};
+}
+
+void QueryTest::testPropertyPhrase()
+{
+    QFETCH(QByteArray, propertyInfix);
+    QFETCH(QString, phrase);
+    QFETCH(QList<quint64>, propertyMatches);
+
+    PropertyPhraseQuery qm(phrase, propertyInfix);
+
+    Transaction tr(db.get(), Transaction::ReadOnly);
+    QCOMPARE(execQuery(tr, qm), propertyMatches);
+}
+
 void QueryTest::testTagTerm_data()
 {
     QTest::addColumn<QByteArray>("term");
     QTest::addColumn<QVector<quint64>>("matchIds");
 
     QTest::addRow("Simple match") << QByteArray("one")
-        << QVector<quint64> { m_id5, m_id6 };
+        << QVector<quint64> { m_ids[5], m_ids[6] };
     QTest::addRow("Only one") << QByteArray("f1")
-        << QVector<quint64> { m_id5 };
+        << QVector<quint64> { m_ids[5] };
     QTest::addRow("Also from phrase") << QByteArray("three")
-        << QVector<quint64> { m_id5, m_id6 };
+        << QVector<quint64> { m_ids[5], m_ids[6] };
 }
 
 void QueryTest::testTagTerm()
@@ -334,13 +427,13 @@ void QueryTest::testTagTermPhrase_data()
     QTest::addColumn<QVector<quint64>>("matchIds");
 
     QTest::addRow("Simple match") << QByteArrayList({"one"})
-        << QVector<quint64> { m_id5, m_id6 };
+        << QVector<quint64> { m_ids[5], m_ids[6] };
     QTest::addRow("Apart") << QByteArrayList({"two", "four"})
         << QVector<quint64> { };
     QTest::addRow("Adjacent") << QByteArrayList({"three", "four"})
         << QVector<quint64> { };
     QTest::addRow("Only phrase") << QByteArrayList({"two", "three"})
-        << QVector<quint64> { m_id6 };
+        << QVector<quint64> { m_ids[6] };
 }
 
 void QueryTest::testTagTermPhrase()
@@ -378,6 +471,7 @@ void QueryTest::testSearchstringParser()
     }
     QEXPECT_FAIL("Match 'dot . Test'", "Bug 407664: Tries to match isolated dot", Continue);
     QEXPECT_FAIL("Match 'file - with hyphen.txt'", "Bug 407664: Tries to match hyphen", Continue);
+    QEXPECT_FAIL("Match '\"soft hyphen\"'", "Soft hyphen not joined", Continue);
     QCOMPARE(matches, expectedFiles);
 }
 
@@ -424,7 +518,7 @@ void QueryTest::testSearchstringParser_data()
     addRow(QStringLiteral("tag:two AND tag:three"), {  QStringLiteral("tagFile1"), QStringLiteral("tagFile2") });
     addRow(QStringLiteral("tag:two-three"), { QStringLiteral("tagFile2") });
 
-    addRow(QStringLiteral("filename:hyphen"), { QStringLiteral("file - with hyphen.txt") });
+    addRow(QStringLiteral("filename:hyphen"), {u"file - with hyphen.txt"_s, u"two_page_hyphenated.txt"_s});
     addRow(QStringLiteral("file with hyphen.txt"), { QStringLiteral("file - with hyphen.txt") });
     addRow(QStringLiteral("file - with hyphen.txt"), { QStringLiteral("file - with hyphen.txt") });
     addRow(QStringLiteral("\"file - with hyphen.txt\""), { QStringLiteral("file - with hyphen.txt") });
@@ -450,7 +544,87 @@ void QueryTest::testSearchstringParser_data()
     addRow(u"modified>1970-01-02"_s,     {u"tagFile1"_s, u"tagFile2"_s});
     addRow(u"modified>1970-01-03"_s,     {});
     addRow(u"mtime>1960-01-03 tag:f1"_s, {u"tagFile1"_s});
+    addRow(u"mimetype=text tag:f1"_s,    {u"tagFile1"_s});
+    addRow(u"mimetype=plain tag:f1"_s,   {u"tagFile1"_s});
+    addRow(u"mimetype:pla tag:f1"_s,     {u"tagFile1"_s});
+    addRow(u"mimetype:text/plain"_s,     {u"tagFile1"_s, u"tagFile2"_s});
+    addRow(u"mimetype:plain/text"_s,     {});
+    addRow(u"the artist"_s,              {u"propertyFile.mp3"_s});
+    addRow(u"\"the artist\""_s,          {u"propertyFile.mp3"_s});
+    addRow(u"artist:\"the artist\""_s,   {u"propertyFile.mp3"_s});
+    addRow(u"photographer"_s,            {u"propertyFile.jpg"_s});
+    addRow(u"artist:photographer"_s,     {u"propertyFile.jpg"_s});
+    addRow(u"model:camera"_s,            {u"propertyFile.jpg"_s});
+    addRow(u"width:1234"_s,              {u"propertyFile.jpg"_s});
+    addRow(u"width=1234"_s,              {u"propertyFile.jpg"_s});
+    addRow(u"width>1230"_s,              {u"propertyFile.jpg"_s});
+    addRow(u"photoExposureTime=0.2"_s,   {});
+    addRow(u"photoExposureTime:0.2"_s,   {u"propertyFile.jpg"_s});
+    addRow(u"photoExposureTime>0.2"_s,   {u"propertyFile.jpg"_s});
+    addRow(u"photoExposureTime<0.3"_s,   {u"propertyFile.jpg"_s});
+    addRow(u"camera"_s,                  {});
+    addRow(u"first"_s,                   {u"two_page.txt"_s});
+    addRow(u"first page. second"_s,      {u"two_page.txt"_s});
+    addRow(u"\"first page.\""_s,         {u"two_page.txt"_s});
+    addRow(u"\"page. second\""_s,        {u"two_page.txt"_s});
+    addRow(u"soft"_s,                    {u"two_page_hyphenated.txt"_s});
+    addRow(u"\"soft hyphen\""_s,         {u"two_page_hyphenated.txt"_s});
+    addRow(u"start"_s,                   {u"three_line.txt"_s});
+    addRow(u"last"_s,                    {u"three_line.txt"_s});
+    addRow(u"line 2"_s,                  {u"three_line.txt"_s});
+    addRow(u"\"line 2\""_s,              {u"three_line.txt"_s});
+    addRow(u"\"Start. Line 2. Last\""_s, {u"three_line.txt"_s});
+    addRow(u"Start. Line 2. Last"_s,     {u"three_line.txt"_s});
+    addRow(u"single"_s,                  {u"one_word.txt"_s});
+    // clang-format on
+}
+
+void QueryTest::testScopedQuery()
+{
+    QFETCH(QString, searchString);
+    QFETCH(QStringList, scopes);
+    QFETCH(QStringList, expectedFiles);
+
+    Query q;
+    q.setSearchString(searchString);
+    q.setSearchScopes(scopes);
+
+    auto res = q.exec();
+    QStringList matches;
+    while (res.next()) {
+        auto path = res.filePath();
+        auto name = path.section(QLatin1Char('/'), -1, -1);
+        matches.append(name);
+    }
+    QCOMPARE(matches, expectedFiles);
+}
+
+void QueryTest::testScopedQuery_data()
+{
+    QTest::addColumn<QString>("searchString");
+    QTest::addColumn<QStringList>("scopes");
+    QTest::addColumn<QStringList>("expectedFiles");
+
+    auto addRow = [](const QString &searchString, //
+                     const QStringList &scopes,
+                     const QStringList &filenameMatches) {
+        QTest::addRow("Match '%s' '%s'", qPrintable(scopes.join(u'|')), qPrintable(searchString)) //
+            << searchString << scopes << filenameMatches;
+    };
+
     // clang-format off
+    addRow(u"crazy"_s,          {},                             {u"file1.txt"_s, u"file4"_s});
+    addRow(u"crazy"_s,          {u"filename"_s},                {});
+    addRow(u"crazy"_s,          {u"content"_s},                 { u"file1.txt"_s, u"file4"_s});
+    addRow(u"crazy"_s,          {u"filename"_s, u"metadata"_s}, {});
+    addRow(u"artist"_s,         {},                             {u"propertyFile.mp3"_s});
+    addRow(u"artist"_s,         {u"filename"_s, u"content"_s},  {});
+    addRow(u"artist"_s,         {u"metadata"_s},                {u"propertyFile.mp3"_s});
+    addRow(u"dog"_s,            {u"filename"_s, u"content"_s},  {u"file1.txt"_s, u"file7_lazy"_s, u"file8_easy"_s});
+    addRow(u"the"_s,            {u"filename"_s, u"content"_s},  {u"file1.txt"_s, u"file2"_s, u"file4"_s, u"file7_lazy"_s});
+    addRow(u"the"_s,            {u"metadata"_s, u"content"_s},  {u"propertyFile.mp3"_s, u"file1.txt"_s, u"file2"_s, u"file4"_s, u"file7_lazy"_s});
+    addRow(u"\"the artist\""_s, {u"metadata"_s, u"content"_s},  {u"propertyFile.mp3"_s});
+    // clang-format on
 }
 
 QTEST_MAIN(QueryTest)

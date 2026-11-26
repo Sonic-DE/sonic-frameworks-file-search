@@ -8,9 +8,8 @@
 #ifndef BALOO_TERM_H
 #define BALOO_TERM_H
 
-#include <QString>
-#include <QVariant>
 #include <QDebug>
+#include <QString>
 
 #include <memory>
 
@@ -47,7 +46,7 @@ public:
      * For DateTime - Contains
      * For any other type - Equals
      */
-    Term(const QString& property, const QVariant& value, Comparator c = Auto);
+    Term(const QString &property, const QString &value, Comparator c = Auto);
 
     /*
      * This term is a combination of other terms
@@ -59,15 +58,6 @@ public:
     ~Term();
 
     bool isValid() const;
-
-    /*
-     * Negate this term. Negation only applies for Equal or Contains
-     * For other Comparators you must invert it yourself
-     */
-    void setNegation(bool isNegated);
-
-    bool negated() const;
-    bool isNegated() const;
 
     void addSubTerm(const Term& term);
     void setSubTerms(const QList<Term>& terms);
@@ -82,7 +72,6 @@ public:
     Operation operation() const;
 
     bool isEmpty() const;
-    bool empty() const;
 
     /*
      * Return the property this term is targeting
@@ -90,14 +79,11 @@ public:
     QString property() const;
     void setProperty(const QString& property);
 
-    QVariant value() const;
-    void setValue(const QVariant& value);
+    QString value() const;
+    void setValue(const QString &value);
 
     Comparator comparator() const;
     void setComparator(Comparator c);
-
-    QVariantMap toVariantMap() const;
-    static Term fromVariantMap(const QVariantMap& map);
 
     bool operator == (const Term& rhs) const;
 
@@ -126,13 +112,6 @@ inline Term operator ||(const Term& lhs, const Term& rhs)
         return lhs;
 
     return {lhs, Term::Or, rhs};
-}
-
-inline Term operator !(const Term& rhs)
-{
-    Term t(rhs);
-    t.setNegation(!rhs.isNegated());
-    return t;
 }
 
 char *toString(const Term& term);

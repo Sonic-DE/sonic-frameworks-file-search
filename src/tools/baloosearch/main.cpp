@@ -87,6 +87,31 @@ void showAllProperties(int exitCode)
         exitCode);
 }
 
+void showAllScopes(int exitCode)
+{
+    constexpr std::array supportedScopes = {
+        std::pair{u"filename"_sv, u"File name"_sv},
+        std::pair{u"content"_sv, u"File textual content"_sv},
+        std::pair{u"metadata"_sv, u"File metadata properties"_sv},
+    };
+
+    QStringList output;
+    output.reserve(3 + supportedScopes.size());
+    const auto header = i18nc("'listScopes' table header", "<searchScope>   Description");
+    output.append(header);
+    output.append(QString(header.size(), u'='));
+
+    for (const auto &scope : supportedScopes) {
+        output.append(u"%1 %2"_s.arg(scope.first, -16).arg(scope.second));
+    }
+    output.append(u""_s);
+
+    QCommandLineParser::showMessageAndExit( //
+        exitCode == 0 ? QCommandLineParser::MessageType::Information : QCommandLineParser::MessageType::Error,
+        output.join(u'\n'),
+        exitCode);
+}
+
 int main(int argc, char* argv[])
 {
     QCoreApplication app(argc, argv);
@@ -107,9 +132,14 @@ int main(int argc, char* argv[])
     parser.addOption(QCommandLineOption({u"o"_s, u"offset"_s}, //
                                         i18n("Offset from which to start the search"),
                                         i18nc("option value name", "offset")));
+    parser.addOption(QCommandLineOption({u"scope"_s}, //
+                                        i18n("Scope used to look for matches"),
+                                        i18nc("option value name", "searchScope")));
     parser.addOption(QCommandLineOption({u"t"_s, u"type"_s}, //
                                         i18n("Type of data to be searched"),
                                         i18nc("option value name", "typeString")));
+    parser.addOption(QCommandLineOption(u"listScopes"_s, //
+                                        i18n("Show supported <searchScope> values")));
     parser.addOption(QCommandLineOption(u"listTypes"_s, //
                                         i18n("Show supported <typeString> values")));
     parser.addOption(QCommandLineOption(u"listProperties"_s, //
@@ -138,7 +168,6 @@ int main(int argc, char* argv[])
 
     int queryLimit = -1;
     int offset = 0;
-    QString typeStr;
     bool showDocumentId = parser.isSet(u"id"_s);
 
     if (parser.isSet(u"listTypes"_s)) {
@@ -149,19 +178,27 @@ int main(int argc, char* argv[])
         showAllProperties(0);
     }
 
+    if (parser.isSet(u"listScopes"_s)) {
+        showAllScopes(0);
+    }
+
     QStringList args = parser.positionalArguments();
     if (args.isEmpty()) {
         parser.showHelp(1);
     }
 
-    if (parser.isSet(u"type"_s)) {
-        typeStr = parser.value(u"type"_s);
-        const auto typeinfo = KFileMetaData::TypeInfo::fromName(typeStr);
+    const auto types = [&parser]() -> QStringList {
+        auto type = parser.value(u"type"_s);
+        if (type.isEmpty()) {
+            return {};
+        }
+        const auto typeinfo = KFileMetaData::TypeInfo::fromName(type);
         if (typeinfo.type() == KFileMetaData::Type::Empty) {
             std::cerr << qPrintable(i18n("ERROR: Invalid \"type\" value, supported values:\n")) << std::endl;
             showKFMAllTypes(1);
         }
-    }
+        return {type};
+    }();
     if (parser.isSet(u"limit"_s)) {
         queryLimit = parser.value(u"limit"_s).toInt();
     }
@@ -180,15 +217,23 @@ int main(int argc, char* argv[])
             parser.showHelp(1);
         }
     }();
+    const auto searchScopes = [&parser]() {
+        auto scopes = parser.values(u"scope"_s);
+        if (scopes.size() == 1) {
+            scopes = scopes[0].split(u',', Qt::SkipEmptyParts);
+        }
+        return scopes;
+    }();
 
     QString queryStr = args.join(QLatin1Char(' '));
 
     Baloo::Query query;
-    query.addType(typeStr);
+    query.setTypes(types);
     query.setSearchString(queryStr);
     query.setLimit(queryLimit);
     query.setOffset(offset);
     query.setSortingOption(orderBy);
+    query.setSearchScopes(searchScopes);
 
     if (parser.isSet(u"directory"_s)) {
         QString folderName = parser.value(u"directory"_s);

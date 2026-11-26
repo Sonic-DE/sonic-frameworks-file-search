@@ -15,40 +15,97 @@
 
 #include <unistd.h> //for STDIN_FILENO
 
-int main(int argc, char* argv[])
-{
-    using Baloo::Private::WorkerPipe;
-    using FileIndexStatus = Baloo::IndexResult::FileStatus;
+using namespace Qt::StringLiterals;
 
-    QCoreApplication app(argc, argv);
+struct Context {
+    using WorkerPipe = Baloo::Private::WorkerPipe;
+    Context();
 
+    void processOne();
+
+    QSocketNotifier inputNotifier;
     QFile input;
-    std::ignore = input.open(STDIN_FILENO, QIODevice::ReadOnly | QIODevice::Unbuffered);
-    QSocketNotifier inputNotifier(STDIN_FILENO, QSocketNotifier::Read);
-
     QFile output;
+    WorkerPipe worker;
+    QVector<quint64> pendingIds;
+    bool indexFast = false;
+    bool waiting = false;
+};
+
+Context::Context()
+    : inputNotifier(STDIN_FILENO, QSocketNotifier::Read)
+    , worker(&input, &output)
+{
+    std::ignore = input.open(STDIN_FILENO, QIODevice::ReadOnly | QIODevice::Unbuffered);
     std::ignore = output.open(STDOUT_FILENO, QIODevice::WriteOnly | QIODevice::Unbuffered);
 
-    WorkerPipe worker(&input, &output);
     QObject::connect(&inputNotifier, &QSocketNotifier::activated,
                      &worker, &WorkerPipe::processIdData);
 
     QObject::connect(&worker, &WorkerPipe::inputEnd, []() {
-        qCInfo(BALOO) << "Pipe closed, exiting";
+        qCInfo(BALOO) << "[TEST] Pipe closed, exiting";
         QCoreApplication::quit();
     });
-    QObject::connect(&worker, &WorkerPipe::newDocumentIds,
-        [&worker](const QVector<quint64>& ids) {
-            QTimer::singleShot(0, [&worker, ids]() {
-                qCInfo(BALOO) << "Processing ...";
-                for(auto id : ids) {
-                    worker.urlStarted(QString::number(id));
-                    worker.urlProcessed(QString::number(id), true, FileIndexStatus::Successful);
-                }
-                worker.batchFinished();
-                qCInfo(BALOO) << "Processing done";
+
+    QObject::connect( //
+        &worker,
+        &WorkerPipe::newDocumentIds,
+        [this](const QVector<quint64> &ids) {
+            qCInfo(BALOO) << "[TEST] Processing" << ids << "...";
+            pendingIds = ids;
+            QTimer::singleShot(0, [this]() {
+                processOne();
             });
         });
+
+    QObject::connect( //
+        &worker,
+        &WorkerPipe::indexSpeed,
+        [this](Baloo::Private::IndexSpeed speed) {
+            qCInfo(BALOO) << "[TEST] Speed changed:" << static_cast<int>(speed);
+            indexFast = speed == Baloo::Private::IndexSpeed::Fast ? true : false;
+            if (waiting) {
+                QTimer::singleShot(0, [this]() {
+                    processOne();
+                });
+                waiting = false;
+            }
+        });
+}
+
+void Context::processOne()
+{
+    using FileIndexStatus = Baloo::IndexResult::FileStatus;
+
+    if (pendingIds.empty()) {
+        worker.batchFinished();
+        qCInfo(BALOO) << "[TEST] Processing done";
+        return;
+    }
+
+    auto id = pendingIds.takeFirst();
+    qCInfo(BALOO) << "[TEST] Processing" << id;
+
+    const auto url = (indexFast ? u"F_"_s : u"S_"_s) + QString::number(id);
+    worker.urlStarted(url);
+    worker.urlProcessed(url, true, FileIndexStatus::Successful);
+
+    if (id >= 2000) {
+        waiting = true;
+        qCInfo(BALOO) << "[TEST] ... waiting for event ...";
+        return;
+    }
+
+    QTimer::singleShot(0, [this]() {
+        processOne();
+    });
+}
+
+int main(int argc, char *argv[])
+{
+    QCoreApplication app(argc, argv);
+
+    Context context;
 
     return app.exec();
 }

@@ -7,6 +7,7 @@
 
 #include "result.h"
 #include "propertydata.h"
+#include "termgenerator.h"
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -15,21 +16,19 @@
 #include <KFileMetaData/PropertyInfo>
 #include <KFileMetaData/TypeInfo>
 
+using namespace Qt::StringLiterals;
+
 namespace Baloo
 {
 
 // In order to use it in a vector
 Result::Result()
     : ExtractionResult(QString(), QString())
-    , m_termGen(m_doc)
-    , m_termGenForText(m_doc)
 {
 }
 
 Result::Result(const QString& url, const QString& mimetype, const Flags& flags)
     : KFileMetaData::ExtractionResult(url, mimetype, flags)
-    , m_termGen(m_doc)
-    , m_termGenForText(m_doc)
 {
 }
 
@@ -43,51 +42,56 @@ void Result::add(KFileMetaData::Property::Property property, const QVariant& val
     } else {
         m_map.insert(property, value);
     }
+}
 
-    int propNum = static_cast<int>(property);
-    QByteArray prefix = 'X' + QByteArray::number(propNum) + '-';
+namespace
+{
+void indexProperties(Baloo::TermGenerator &termGen, Baloo::Document &doc, const KFileMetaData::PropertyMultiMap &properties)
+{
+    auto it = properties.cbegin();
+    while (it != properties.cend()) {
+        const auto property = it.key();
+        const auto rangeEnd = properties.upperBound(property);
 
-    if (value.typeId() == QMetaType::Bool) {
-        m_doc.addTerm(prefix);
-    } else if (value.typeId() == QMetaType::Int || value.typeId() == QMetaType::UInt) {
-        const QByteArray term = prefix + value.toString().toUtf8();
-        m_doc.addTerm(term);
-    } else if (value.typeId() == QMetaType::QDate) {
-        const QByteArray term = prefix + value.toDate().toString(Qt::ISODate).toUtf8();
-        m_doc.addTerm(term);
-    } else if (value.typeId() == QMetaType::QDateTime) {
-        const QByteArray term = prefix + value.toDateTime().toString(Qt::ISODate).toUtf8();
-        m_doc.addTerm(term);
-    } else if (value.typeId() == QMetaType::QStringList) {
-        bool shouldBeIndexed = KFileMetaData::PropertyInfo(property).shouldBeIndexed();
-        const auto valueList = value.toStringList();
-        for (const auto& val : valueList)
-        {
-            if (val.isEmpty()) {
-                continue;
+        const int propNum = static_cast<int>(property);
+        const QByteArray prefix = 'X' + QByteArray::number(propNum) + '-';
+
+        while (it != rangeEnd) {
+            const auto value = it.value();
+
+            if (value.typeId() == QMetaType::Bool) {
+                doc.addTerm(prefix);
+            } else if (value.typeId() == QMetaType::Int || value.typeId() == QMetaType::UInt) {
+                const QByteArray term = prefix + value.toString().toUtf8();
+                doc.addTerm(term);
+            } else if (value.typeId() == QMetaType::QDate) {
+                const QByteArray term = prefix + value.toDate().toString(Qt::ISODate).toUtf8();
+                doc.addTerm(term);
+            } else if (value.typeId() == QMetaType::QDateTime) {
+                const QByteArray term = prefix + value.toDateTime().toString(Qt::ISODate).toUtf8();
+                doc.addTerm(term);
+            } else {
+                const QString val = value.toString();
+                if (!val.isEmpty()) {
+                    termGen.indexProperty(val, prefix);
+                }
             }
-            m_termGen.indexText(val, prefix);
-            if (shouldBeIndexed) {
-                m_termGen.indexText(val);
-            }
-        }
-    } else {
-        const QString val = value.toString();
-        if (val.isEmpty()) {
-            return;
-        }
-
-        m_termGen.indexText(val, prefix);
-        KFileMetaData::PropertyInfo pi(property);
-        if (pi.shouldBeIndexed()) {
-            m_termGen.indexText(val);
+            ++it;
         }
     }
 }
 
+void indexText(Baloo::TermGenerator &termGen, const QStringList &text)
+{
+    for (const auto &block : text) {
+        termGen.indexText(block);
+    }
+}
+} // namespace <anonymous>
+
 void Result::append(const QString& text)
 {
-    m_termGenForText.indexText(text);
+    m_text.append(text);
 }
 
 void Result::addType(KFileMetaData::Type::Type type)
@@ -98,27 +102,25 @@ void Result::addType(KFileMetaData::Type::Type type)
 
 void Result::finish()
 {
-    if (m_map.isEmpty()) {
-        m_doc.setData(QByteArray());
-        return;
-    }
-    QJsonObject jo = Baloo::propertyMapToJson(m_map);
     QJsonDocument jdoc;
-    jdoc.setObject(jo);
+    if (m_map.isEmpty()) {
+        QJsonObject mo{{u"M"_s, m_doc.mimetype()}};
+        jdoc.setObject(mo);
+    } else {
+        QJsonObject jo = Baloo::propertyMapToJson(m_map);
+        jo.insert(u"M"_s, m_doc.mimetype());
+        jdoc.setObject(jo);
+    }
     m_doc.setData(jdoc.toJson(QJsonDocument::JsonFormat::Compact));
+
+    Baloo::TermGenerator termGen(m_doc);
+    indexProperties(termGen, m_doc, m_map);
+    indexText(termGen, m_text);
 }
 
 void Result::setDocument(const Baloo::Document& doc)
 {
     m_doc = doc;
-    // All document metadata are indexed from position 1000
-    m_termGen.setDocument(m_doc);
-    m_termGen.setPosition(1000);
-
-    // All document plain text starts from 10000. This is done to avoid
-    // clashes with the term positions
-    m_termGenForText.setDocument(m_doc);
-    m_termGenForText.setPosition(10000);
 }
 
 } // namespace Baloo

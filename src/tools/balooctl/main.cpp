@@ -38,14 +38,12 @@
 
 #include "clearcommand.h"
 #include "indexcommand.h"
+#include "purgecommand.h"
 
 using namespace Baloo;
+using namespace Qt::StringLiterals;
 
-void start()
-{
-    const QString exe = QStringLiteral(KDE_INSTALL_FULL_LIBEXECDIR_KF "/baloo_file");
-    QProcess::startDetached(exe, QStringList());
-}
+static const auto BALOO_SERVICE_NAME{u"org.kde.baloo"_s};
 
 int main(int argc, char* argv[])
 {
@@ -135,7 +133,7 @@ int main(int argc, char* argv[])
                 out << "File Indexer already running\n";
             } else {
                 out << "Enabling and starting the File Indexer\n";
-                start();
+                QDBusConnection::sessionBus().interface()->startService(BALOO_SERVICE_NAME);
             }
         } else {
             out << "Disabling and stopping the File Indexer\n";
@@ -147,37 +145,8 @@ int main(int argc, char* argv[])
     }
 
     if (command == QLatin1String("purge")) {
-        bool running = mainInterface.isValid();
-
-        if (running) {
-            mainInterface.quit();
-            out << "Stopping the File Indexer ...";
-            for (int i = 5 * 60; i; --i) {
-                QCoreApplication::processEvents();
-                if (!mainInterface.isValid()) {
-                    break;
-                }
-                out << "." << Qt::flush;
-                QThread::msleep(200);
-            }
-            if (!mainInterface.isValid()) {
-                out << " - done\n";
-            } else {
-                out << " - failed to stop!\n";
-                return 1;
-            }
-        }
-
-        const QString path = fileIndexDbPath() + QStringLiteral("/index");
-        QFile(path).remove();
-        out << "Deleted the index database\n";
-
-        if (running) {
-            start();
-            out << "Restarting the File Indexer\n";
-        }
-
-        return 0;
+        PurgeCommand commandPurge;
+        return commandPurge.exec(parser);
     }
 
     if (command == QLatin1String("suspend")) {

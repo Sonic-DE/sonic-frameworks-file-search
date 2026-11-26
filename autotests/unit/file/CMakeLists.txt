@@ -16,7 +16,6 @@ baloo_file_auto_tests(
     fileindexerconfigtest
     basicindexingjobtest
     filtereddiriteratortest
-    unindexedfileiteratortest
     metadatamovertest
     extractorcommandpipetest
 )
@@ -71,3 +70,21 @@ ecm_add_test(
     TEST_NAME "modifiedfileindexertest"
     LINK_LIBRARIES Qt6::Test baloofilecommon
 )
+
+# These write the same baloofilerc in Qt's test-mode config directory.
+set_tests_properties(fileindexerconfigtest filtereddiriteratortest filewatchtest modifiedfileindexertest
+    PROPERTIES RESOURCE_LOCK baloofilerc)
+
+# Processing of document content
+add_executable(documentcontenttest_bin
+    documentcontenttest.cpp
+    ../../../src/file/extractor/result.cpp
+)
+target_link_libraries(documentcontenttest_bin
+    Qt6::Test
+    baloofilecommon
+)
+ecm_mark_as_test(documentcontenttest_bin)
+
+# Run the benchmarks with just 1 iteration during CI, so we known it works
+add_test(NAME documentcontenttest COMMAND documentcontenttest_bin "-iterations" "1")
